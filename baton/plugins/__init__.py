@@ -9,6 +9,14 @@ from .keepalive import KeepaliveDaemon, init_keepalive_daemon, get_keepalive_dae
 from .logger import BatonLogger
 from .playwright_auth import PlaywrightAuthManager, OAuthSession
 from .rate_limits import RateLimitTracker, RateLimitConfig, init_rate_limiter, get_rate_limiter
+from .model_checker import (
+    ModelAvailabilityChecker,
+    BedrockModelChecker,
+    VertexModelChecker,
+    ModelInfo,
+    get_model_checker,
+    init_model_checker,
+)
 from .router import BatonRouter
 from .twilio import BatonTwilio
 from .zones import BatonZones
@@ -40,4 +48,11 @@ __all__ = [
     "KeepaliveDaemon",
     "init_keepalive_daemon",
     "get_keepalive_daemon",
+    # Model Checker
+    "ModelAvailabilityChecker",
+    "BedrockModelChecker",
+    "VertexModelChecker",
+    "ModelInfo",
+    "get_model_checker",
+    "init_model_checker",
 ]

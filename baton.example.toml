@@ -1,0 +1,79 @@
+# Baton Configuration
+# Copy to ~/.config/lifemaestro/baton.toml and customize
+
+[server]
+host = "127.0.0.1"
+port = 4000
+workers = 1
+
+[logging]
+dir = "/data/baton/logs"
+format = "jsonl"
+rotate_mb = 100
+retention_days = 365
+
+[auth.bitwarden]
+enabled = true
+session_file = "~/.config/bitwarden/session"
+cache_ttl = 3600  # seconds
+
+# Model aliases - use these in requests instead of specific models
+[aliases]
+fast = ["claude-3-5-haiku-latest", "gpt-4o-mini", "gemini-2.0-flash"]
+smart = ["claude-sonnet-4-20250514", "gpt-4o", "gemini-2.0-flash-thinking"]
+code = ["claude-sonnet-4-20250514", "gpt-4o", "deepseek-coder"]
+local = ["ollama/llama3.2", "ollama/codellama"]
+cheap = ["gpt-4o-mini", "claude-3-5-haiku-latest"]
+
+# Provider-specific configuration
+[providers.anthropic]
+# API key fetched from Bitwarden item "Anthropic API"
+# Or set via environment: ANTHROPIC_API_KEY
+
+[providers.openai]
+# API key fetched from Bitwarden item "OpenAI API"
+# Or set via environment: OPENAI_API_KEY
+
+[providers.google]
+# API key fetched from Bitwarden item "Google AI API"
+# Or set via environment: GOOGLE_API_KEY
+
+[providers.ollama]
+base_url = "http://localhost:11434"
+
+# Fan-out configuration
+[fanout]
+default_mode = "first"  # first, all, race, vote, judge
+judge_model = "claude-3-5-haiku-latest"
+timeout_seconds = 60
+
+# Guardrails
+[guardrails]
+enabled = true
+rate_limit_rpm = 100
+# Actions requiring SMS approval
+require_approval = []
+# Patterns to block
+blocked_patterns = []
+
+# Twilio for SMS notifications (optional)
+[twilio]
+# account_sid = ""
+# auth_token = ""
+# from_number = ""
+# to_number = ""
+
+# Per-zone configuration
+[zones.work]
+default_model = "claude-sonnet-4-20250514"
+default_alias = "smart"
+default_temperature = 0.3
+blocked_providers = []
+rate_limit_rpm = 50
+# cost_limit = 10.0  # per-request limit in USD
+
+[zones.personal]
+default_model = "claude-3-5-haiku-latest"
+default_alias = "fast"
+default_temperature = 0.7
+blocked_providers = []

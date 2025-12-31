@@ -1,0 +1,29 @@
+[Unit]
+Description=Baton AI Proxy Gateway
+Documentation=https://github.com/sethdf/baton
+After=network.target
+Wants=bitwarden-unlock.service
+
+[Service]
+Type=simple
+User=%i
+Environment=BATON_CONFIG=%h/.config/lifemaestro/baton.toml
+ExecStart=%h/.local/bin/baton serve
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=baton
+
+# Security
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/data/baton
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

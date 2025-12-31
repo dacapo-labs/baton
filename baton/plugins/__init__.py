@@ -17,6 +17,15 @@ from .model_checker import (
     get_model_checker,
     init_model_checker,
 )
+from .model_monitor import (
+    ModelMonitor,
+    MonitorConfig,
+    ModelChange,
+    get_model_monitor,
+    init_model_monitor,
+    start_model_monitor,
+    stop_model_monitor,
+)
 from .router import BatonRouter
 from .twilio import BatonTwilio
 from .zones import BatonZones
@@ -55,4 +64,12 @@ __all__ = [
     "ModelInfo",
     "get_model_checker",
     "init_model_checker",
+    # Model Monitor
+    "ModelMonitor",
+    "MonitorConfig",
+    "ModelChange",
+    "get_model_monitor",
+    "init_model_monitor",
+    "start_model_monitor",
+    "stop_model_monitor",
 ]

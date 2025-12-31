@@ -12,12 +12,153 @@ format = "jsonl"
 rotate_mb = 100
 retention_days = 365
 
+# ============================================
+# AUTHENTICATION
+# ============================================
+
 [auth.bitwarden]
 enabled = true
 session_file = "~/.config/bitwarden/session"
 cache_ttl = 3600  # seconds
 
-# Model aliases - use these in requests instead of specific models
+[auth.playwright]
+enabled = true
+headless = true
+storage_dir = "~/.config/baton/sessions"
+
+# ============================================
+# PROVIDERS - Explicit Auth Methods
+# ============================================
+# Model format: <provider>/<auth_method>/<model>
+# Examples:
+#   anthropic/api/claude-sonnet-4-20250514
+#   anthropic/oauth/claude-sonnet-4-20250514
+#   openai/codex/codex-1
+#   google/vertex/gemini-2.0-flash
+
+# Anthropic
+[providers.anthropic.api]
+type = "api_key"
+env_var = "ANTHROPIC_API_KEY"
+bitwarden_item = "Anthropic API"
+
+[providers.anthropic.oauth]
+type = "cli_oauth"
+cli = "claude"
+session_file = "~/.claude/auth.json"
+# proxy_mode = "cli"  # "cli" = shell out, "token" = extract token
+
+# OpenAI
+[providers.openai.api]
+type = "api_key"
+env_var = "OPENAI_API_KEY"
+bitwarden_item = "OpenAI API"
+
+[providers.openai.codex]
+type = "cli_oauth"
+cli = "codex"
+# proxy_mode = "cli"
+
+# Google
+[providers.google.api]
+type = "api_key"
+env_var = "GEMINI_API_KEY"
+bitwarden_item = "Google AI API"
+
+[providers.google.oauth]
+type = "cli_oauth"
+cli = "gemini"
+# For Google AI Pro/Ultra subscribers
+
+[providers.google.vertex]
+type = "gcp_adc"
+project = ""  # Set via GOOGLE_CLOUD_PROJECT env var
+region = "us-central1"
+
+[providers.google.vertex_sa]
+type = "service_account"
+credentials_file = "~/.config/gcloud/service-account.json"
+
+# AWS Bedrock
+[providers.aws.bedrock]
+type = "aws_profile"
+profile = "default"
+region = "us-east-1"
+
+# Local
+[providers.ollama]
+base_url = "http://localhost:11434"
+
+# ============================================
+# RATE LIMITS
+# ============================================
+# Per provider/auth/plan limits
+# Format: [rate_limits."<provider>/<auth>/<plan>"]
+
+[rate_limits."anthropic/api"]
+requests_per_minute = 60
+requests_per_day = 10000
+tokens_per_minute = 100000
+
+[rate_limits."anthropic/oauth/pro"]
+requests_per_minute = 50
+# No hard daily limit for Pro
+
+[rate_limits."anthropic/oauth/max"]
+requests_per_minute = 100
+
+[rate_limits."openai/api"]
+requests_per_minute = 60
+requests_per_day = 10000
+tokens_per_minute = 150000
+
+[rate_limits."openai/codex/plus"]
+requests_per_minute = 30
+requests_per_day = 500
+
+[rate_limits."openai/codex/pro"]
+requests_per_minute = 60
+requests_per_day = 1000
+
+[rate_limits."google/api/free"]
+requests_per_minute = 15
+requests_per_day = 1500
+
+[rate_limits."google/api/paid"]
+requests_per_minute = 1000
+tokens_per_minute = 4000000
+
+[rate_limits."google/oauth/pro"]
+requests_per_minute = 60
+requests_per_day = 1000
+
+# ============================================
+# KEEPALIVE
+# ============================================
+# Credential monitoring and auto-refresh
+
+[keepalive]
+enabled = true
+interval = 300  # Check every 5 minutes
+
+# Providers to monitor
+providers = ["aws", "gcp", "azure", "bitwarden"]
+
+# AWS profiles to check
+aws_profiles = ["default"]
+
+# Refresh thresholds (seconds before expiry)
+[keepalive.thresholds]
+aws_sso = 3600      # 1 hour
+gcp_adc = 600       # 10 minutes
+azure_ad = 3000     # 50 minutes
+oauth = 3600        # 1 hour
+
+# ============================================
+# MODEL ALIASES
+# ============================================
+# Use these in requests instead of specific models
+
 [aliases]
 fast = ["claude-3-5-haiku-latest", "gpt-4o-mini", "gemini-2.0-flash"]
 smart = ["claude-sonnet-4-20250514", "gpt-4o", "gemini-2.0-flash-thinking"]
@@ -25,29 +166,19 @@ code = ["claude-sonnet-4-20250514", "gpt-4o", "deepseek-coder"]
 local = ["ollama/llama3.2", "ollama/codellama"]
 cheap = ["gpt-4o-mini", "claude-3-5-haiku-latest"]
 
-# Provider-specific configuration
-[providers.anthropic]
-# API key fetched from Bitwarden item "Anthropic API"
-# Or set via environment: ANTHROPIC_API_KEY
+# ============================================
+# FAN-OUT
+# ============================================
 
-[providers.openai]
-# API key fetched from Bitwarden item "OpenAI API"
-# Or set via environment: OPENAI_API_KEY
-
-[providers.google]
-# API key fetched from Bitwarden item "Google AI API"
-# Or set via environment: GOOGLE_API_KEY
-
-[providers.ollama]
-base_url = "http://localhost:11434"
-
-# Fan-out configuration
 [fanout]
 default_mode = "first"  # first, all, race, vote, judge
 judge_model = "claude-3-5-haiku-latest"
 timeout_seconds = 60
 
-# Guardrails
+# ============================================
+# GUARDRAILS
+# ============================================
+
 [guardrails]
 enabled = true
 rate_limit_rpm = 100
@@ -56,20 +187,29 @@ require_approval = []
 # Patterns to block
 blocked_patterns = []
 
-# Twilio for SMS notifications (optional)
+# ============================================
+# TWILIO (Optional - SMS notifications)
+# ============================================
+
 [twilio]
 # account_sid = ""
 # auth_token = ""
 # from_number = ""
 # to_number = ""
 
-# Per-zone configuration
+# ============================================
+# ZONES
+# ============================================
+# Per-zone configuration for different contexts
+
 [zones.work]
 default_model = "claude-sonnet-4-20250514"
 default_alias = "smart"
 default_temperature = 0.3
 blocked_providers = []
 rate_limit_rpm = 50
+# Prefer API auth for work
+preferred_auth = "api"
 # cost_limit = 10.0  # per-request limit in USD
 
 [zones.personal]
@@ -77,3 +217,5 @@ default_model = "claude-3-5-haiku-latest"
 default_alias = "fast"
 default_temperature = 0.7
 blocked_providers = []
+# Prefer OAuth for personal (uses subscription)
+preferred_auth = "oauth"

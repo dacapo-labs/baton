@@ -57,6 +57,13 @@ from .plugins.keepalive import (
     get_keepalive_daemon,
 )
 from .plugins.cli_auth import CLIAuthManager
+from .plugins.standards_monitor import (
+    StandardsMonitor,
+    StandardsMonitorConfig,
+    init_standards_monitor,
+    get_standards_monitor,
+    MONITORED_REPOS,
+)
 
 
 class ChatRequest(BaseModel):
@@ -89,6 +96,7 @@ skills_cache: SkillsCache | None = None
 skillsmp_cache: SkillsMPCache | None = None
 keepalive: KeepaliveDaemon | None = None
 cli_auth: CLIAuthManager | None = None
+standards_monitor: StandardsMonitor | None = None
 
 
 @asynccontextmanager
@@ -96,7 +104,7 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     global config, auth, logger, judge, fanout, zones, router, guardrails, rate_limiter
     global model_checker, model_monitor, version_checker, repo_updater, twilio
-    global skills_cache, skillsmp_cache, keepalive, cli_auth
+    global skills_cache, skillsmp_cache, keepalive, cli_auth, standards_monitor
 
     config = load_config()
 
@@ -188,6 +196,20 @@ async def lifespan(app: FastAPI):
             ))
             await start_skillsmp_cache()
 
+    # Initialize standards monitor (AI tooling standards tracker)
+    standards_config = config.get("standards_monitor", {})
+    if standards_config.get("enabled", True):
+        github_token = auth.get_api_key("github") if auth else None
+        standards_monitor = init_standards_monitor(StandardsMonitorConfig(
+            check_interval=standards_config.get("check_interval", 3600),
+            cache_file=standards_config.get("cache_file"),
+            github_token=github_token,
+            monitor_cli_releases=standards_config.get("monitor_cli_releases", True),
+            monitor_specs=standards_config.get("monitor_specs", True),
+            monitor_api_changes=standards_config.get("monitor_api_changes", True),
+        ))
+        standards_monitor.start()
+
     yield
 
     # Cleanup
@@ -199,6 +221,8 @@ async def lifespan(app: FastAPI):
         version_checker.stop()
     if repo_updater:
         repo_updater.stop()
+    if standards_monitor:
+        standards_monitor.stop()
     await stop_skills_cache()
     await stop_skillsmp_cache()
 
@@ -347,6 +371,7 @@ async def unified_status():
         "skills_cache": skills_cache is not None,
         "skillsmp_cache": skillsmp_cache is not None,
         "cli_auth": cli_auth is not None,
+        "standards_monitor": standards_monitor is not None,
     }
 
     return status
@@ -2047,6 +2072,101 @@ async def repos_check_one(name: str):
 # NOTE: Filesystem-modifying endpoints (update, update-all, clone) removed.
 # These operations belong in CLI tools (maestro vendor) not in the daemon.
 # Baton only tracks/monitors repos, doesn't modify them.
+
+
+# =========================================================================
+# Standards Monitor Endpoints
+# =========================================================================
+
+
+@app.get("/standards")
+async def standards_summary():
+    """Get summary of monitored AI standards and tooling.
+
+    Tracks releases from Claude Code, Codex, Gemini CLI, and spec changes.
+    """
+    if not standards_monitor:
+        return {"enabled": False, "message": "Standards monitor not enabled"}
+
+    return {
+        "enabled": True,
+        "summary": standards_monitor.get_summary(),
+        "compatibility": standards_monitor.get_compatibility_matrix(),
+    }
+
+
+@app.get("/standards/releases")
+async def standards_releases():
+    """Get all cached release information."""
+    if not standards_monitor:
+        raise HTTPException(status_code=503, detail="Standards monitor not enabled")
+
+    return {
+        "releases": standards_monitor.get_all_releases(),
+        "monitored_repos": list(MONITORED_REPOS.keys()),
+    }
+
+
+@app.get("/standards/releases/{repo:path}")
+async def standards_release_info(repo: str):
+    """Get release info for a specific repo.
+
+    Example: /standards/releases/anthropics/claude-code
+    """
+    if not standards_monitor:
+        raise HTTPException(status_code=503, detail="Standards monitor not enabled")
+
+    info = standards_monitor.get_repo_info(repo)
+    if not info:
+        raise HTTPException(status_code=404, detail=f"No info for repo: {repo}")
+
+    return info
+
+
+@app.get("/standards/updates")
+async def standards_updates(since_hours: int = 24):
+    """Get updates since a given time period.
+
+    Args:
+        since_hours: Look back this many hours (default: 24)
+    """
+    if not standards_monitor:
+        raise HTTPException(status_code=503, detail="Standards monitor not enabled")
+
+    import time
+    since_timestamp = time.time() - (since_hours * 3600)
+
+    updates = standards_monitor.get_updates_since(since_timestamp)
+    return {
+        "since_hours": since_hours,
+        "updates": updates,
+        "count": len(updates),
+        "has_breaking": any(u.get("is_breaking") for u in updates),
+    }
+
+
+@app.post("/standards/check")
+async def standards_check_now():
+    """Trigger immediate check for updates."""
+    if not standards_monitor:
+        raise HTTPException(status_code=503, detail="Standards monitor not enabled")
+
+    results = await standards_monitor.check_all()
+    return {
+        "checked": True,
+        "checked_at": results.get("checked_at"),
+        "releases_count": len(results.get("releases", [])),
+        "new_since_last_check": results.get("new_since_last_check", []),
+    }
+
+
+@app.get("/standards/compatibility")
+async def standards_compatibility():
+    """Get compatibility matrix for skills and context files across CLIs."""
+    if not standards_monitor:
+        raise HTTPException(status_code=503, detail="Standards monitor not enabled")
+
+    return standards_monitor.get_compatibility_matrix()
 
 
 # =========================================================================

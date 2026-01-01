@@ -46,6 +46,17 @@ from .repo_updater import (
     clone_repo,
     KNOWN_REPOS,
 )
+from .skills_cache import (
+    SkillsCache,
+    SkillsCacheConfig,
+    SkillInfo,
+    MCPServerInfo,
+    MCPToolInfo,
+    get_skills_cache,
+    init_skills_cache,
+    start_skills_cache,
+    stop_skills_cache,
+)
 from .router import BatonRouter
 from .twilio import BatonTwilio
 from .zones import BatonZones
@@ -110,4 +121,14 @@ __all__ = [
     "stop_repo_updater",
     "clone_repo",
     "KNOWN_REPOS",
+    # Skills Cache
+    "SkillsCache",
+    "SkillsCacheConfig",
+    "SkillInfo",
+    "MCPServerInfo",
+    "MCPToolInfo",
+    "get_skills_cache",
+    "init_skills_cache",
+    "start_skills_cache",
+    "stop_skills_cache",
 ]

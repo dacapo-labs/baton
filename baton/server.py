@@ -32,7 +32,6 @@ from .plugins.repo_updater import (
     RepoUpdaterConfig,
     init_repo_updater,
     get_repo_updater,
-    clone_repo,
     KNOWN_REPOS,
 )
 from .plugins.twilio import BatonTwilio
@@ -2045,50 +2044,9 @@ async def repos_check_one(name: str):
     return info.to_dict()
 
 
-@app.post("/repos/update/{name}")
-async def repos_update_one(name: str, force: bool = False):
-    """Update a specific repository."""
-    if not repo_updater:
-        raise HTTPException(status_code=503, detail="Repo updater not enabled")
-
-    info = await repo_updater.update_repo(name, force=force)
-    return info.to_dict()
-
-
-@app.post("/repos/update-all")
-async def repos_update_all(force: bool = False):
-    """Update all tracked repositories."""
-    if not repo_updater:
-        raise HTTPException(status_code=503, detail="Repo updater not enabled")
-
-    results = await repo_updater.update_all(force=force)
-    return {
-        "repos": {name: info.to_dict() for name, info in results.items()},
-        "updated": [
-            name for name, info in results.items()
-            if info.last_updated and not info.error
-        ],
-    }
-
-
-class RepoCloneRequest(BaseModel):
-    """Request to clone a known repository."""
-
-    name: str
-    target_path: str | None = None
-    branch: str = "main"
-
-
-@app.post("/repos/clone")
-async def repos_clone(request: RepoCloneRequest):
-    """Clone a known repository."""
-    info = await clone_repo(request.name, request.target_path, request.branch)
-
-    # Add to tracking if successful
-    if not info.error and repo_updater:
-        repo_updater.add_repo(info.name, info.path, info.branch)
-
-    return info.to_dict()
+# NOTE: Filesystem-modifying endpoints (update, update-all, clone) removed.
+# These operations belong in CLI tools (maestro vendor) not in the daemon.
+# Baton only tracks/monitors repos, doesn't modify them.
 
 
 # =========================================================================

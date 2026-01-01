@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -983,6 +984,96 @@ async def get_auth_env(provider: str | None = None):
     # Return all configured env vars
     env_vars = auth.export_env_vars()
     return {"env_vars": env_vars}
+
+
+@app.get("/auth/matrix")
+async def get_auth_matrix():
+    """Get comprehensive authentication status for ALL providers and methods.
+
+    Returns a matrix showing:
+    - All providers (anthropic, openai, google, aws, gcp)
+    - All auth methods per provider (api, oauth, cloud)
+    - Status of each (available, configured, authenticated)
+    """
+    if not auth:
+        raise HTTPException(status_code=500, detail="Auth not initialized")
+
+    providers = ["anthropic", "openai", "google", "aws", "gcp"]
+    matrix = {}
+
+    for provider in providers:
+        provider_status = {
+            "api": {"available": False, "configured": False},
+            "oauth": {"available": False, "authenticated": False, "user": None},
+            "cloud": {"available": False, "configured": False},
+        }
+
+        # Check API key (from Bitwarden)
+        api_key = auth.get_api_key(provider)
+        if api_key:
+            provider_status["api"]["available"] = True
+            provider_status["api"]["configured"] = True
+
+        # Check OAuth via CLI auth
+        if cli_auth:
+            try:
+                cli_provider = cli_auth.get_provider(provider)
+                if cli_provider and cli_provider.is_installed():
+                    provider_status["oauth"]["available"] = True
+                    status = await cli_provider.check_auth()
+                    if status and status.authenticated:
+                        provider_status["oauth"]["authenticated"] = True
+                        provider_status["oauth"]["user"] = status.user
+                        if status.ttl_seconds:
+                            provider_status["oauth"]["ttl_seconds"] = status.ttl_seconds
+            except Exception:
+                pass
+
+        # Check cloud provider auth
+        if provider == "aws":
+            # Check AWS credentials
+            import os
+            if os.environ.get("AWS_PROFILE") or os.environ.get("AWS_ACCESS_KEY_ID"):
+                provider_status["cloud"]["available"] = True
+                provider_status["cloud"]["configured"] = True
+                provider_status["cloud"]["method"] = "profile" if os.environ.get("AWS_PROFILE") else "keys"
+        elif provider == "gcp":
+            # Check GCP ADC
+            adc_path = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
+            if adc_path.exists():
+                provider_status["cloud"]["available"] = True
+                provider_status["cloud"]["configured"] = True
+                provider_status["cloud"]["method"] = "adc"
+
+        matrix[provider] = provider_status
+
+    # Add Bitwarden status
+    bw_session = auth._get_bw_session() if hasattr(auth, '_get_bw_session') else None
+    bw_status = {
+        "unlocked": bw_session is not None,
+        "session_available": bw_session is not None,
+    }
+
+    # Add keepalive status if available
+    keepalive_status = None
+    if keepalive:
+        health = keepalive.get_health()
+        keepalive_status = {
+            "healthy": health["healthy"],
+            "healthy_count": health["healthy_count"],
+            "unhealthy_count": health["unhealthy_count"],
+        }
+
+    return {
+        "providers": matrix,
+        "bitwarden": bw_status,
+        "keepalive": keepalive_status,
+        "summary": {
+            "providers_with_api": sum(1 for p in matrix.values() if p["api"]["configured"]),
+            "providers_with_oauth": sum(1 for p in matrix.values() if p["oauth"]["authenticated"]),
+            "providers_with_cloud": sum(1 for p in matrix.values() if p["cloud"]["configured"]),
+        },
+    }
 
 
 # =========================================================================

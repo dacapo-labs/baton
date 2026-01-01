@@ -35,6 +35,17 @@ from .version_checker import (
     start_version_checker,
     stop_version_checker,
 )
+from .repo_updater import (
+    RepoUpdater,
+    RepoUpdaterConfig,
+    RepoInfo,
+    get_repo_updater,
+    init_repo_updater,
+    start_repo_updater,
+    stop_repo_updater,
+    clone_repo,
+    KNOWN_REPOS,
+)
 from .router import BatonRouter
 from .twilio import BatonTwilio
 from .zones import BatonZones
@@ -89,4 +100,14 @@ __all__ = [
     "init_version_checker",
     "start_version_checker",
     "stop_version_checker",
+    # Repo Updater
+    "RepoUpdater",
+    "RepoUpdaterConfig",
+    "RepoInfo",
+    "get_repo_updater",
+    "init_repo_updater",
+    "start_repo_updater",
+    "stop_repo_updater",
+    "clone_repo",
+    "KNOWN_REPOS",
 ]

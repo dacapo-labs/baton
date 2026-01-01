@@ -16,6 +16,22 @@ from pydantic import BaseModel
 from .config import load_config
 from .plugins import BatonAuth, BatonFanout, BatonJudge, BatonLogger, BatonZones
 from .plugins.fanout import FanoutMode
+from .plugins.skills_cache import (
+    SkillsCache,
+    SkillsCacheConfig,
+    init_skills_cache,
+    get_skills_cache,
+    start_skills_cache,
+    stop_skills_cache,
+)
+from .plugins.skillsmp_cache import (
+    SkillsMPCache,
+    SkillsMPCacheConfig,
+    init_skillsmp_cache,
+    get_skillsmp_cache,
+    start_skillsmp_cache,
+    stop_skillsmp_cache,
+)
 
 
 class ChatRequest(BaseModel):
@@ -36,12 +52,14 @@ logger: BatonLogger | None = None
 judge: BatonJudge | None = None
 fanout: BatonFanout | None = None
 zones: BatonZones | None = None
+skills_cache: SkillsCache | None = None
+skillsmp_cache: SkillsMPCache | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    global config, auth, logger, judge, fanout, zones
+    global config, auth, logger, judge, fanout, zones, skills_cache, skillsmp_cache
 
     config = load_config()
 
@@ -58,7 +76,36 @@ async def lifespan(app: FastAPI):
     litellm.drop_params = True
     litellm.set_verbose = config.get("debug", False)
 
+    # Initialize skills cache (local skills)
+    skills_config = config.get("skills", {})
+    if skills_config.get("enabled", True):
+        skills_cache = init_skills_cache(SkillsCacheConfig(
+            skill_paths=skills_config.get("skill_paths", []),
+            cache_file=skills_config.get("cache_file"),
+            refresh_interval=skills_config.get("refresh_interval", 3600),
+        ))
+        await start_skills_cache()
+
+    # Initialize SkillsMP cache (marketplace)
+    skillsmp_config = config.get("skillsmp", {})
+    if skillsmp_config.get("enabled", True):
+        # Get API key from Bitwarden
+        skillsmp_api_key = auth.get_api_key("skillsmp")
+        if skillsmp_api_key:
+            skillsmp_cache = init_skillsmp_cache(SkillsMPCacheConfig(
+                api_key=skillsmp_api_key,
+                cache_file=skillsmp_config.get("cache_file", "~/.baton/skillsmp_cache.json"),
+                refresh_interval=skillsmp_config.get("refresh_interval", 86400),
+                trusted_authors=set(skillsmp_config.get("trusted_authors", [])),
+                known_orgs=set(skillsmp_config.get("known_orgs", [])),
+            ))
+            await start_skillsmp_cache()
+
     yield
+
+    # Cleanup
+    await stop_skills_cache()
+    await stop_skillsmp_cache()
 
 
 app = FastAPI(
@@ -275,6 +322,203 @@ async def restore_auth():
             os.environ[key] = value
 
     return {"restored": success}
+
+
+# =========================================================================
+# Skills Endpoints
+# =========================================================================
+
+
+@app.get("/skills")
+async def list_skills():
+    """List all locally installed skills."""
+    cache = get_skills_cache()
+    if not cache:
+        return {"skills": [], "total": 0}
+
+    skills = cache.get_all_skills()
+    return {
+        "skills": [
+            {
+                "name": s.name,
+                "path": s.path,
+                "title": s.metadata.get("title", s.name),
+            }
+            for s in skills
+        ],
+        "total": len(skills),
+    }
+
+
+@app.get("/skills/search")
+async def search_skills(q: str, limit: int = 20):
+    """Search locally installed skills."""
+    cache = get_skills_cache()
+    if not cache:
+        return {"results": [], "query": q}
+
+    results = cache.search_skills(q)[:limit]
+    return {
+        "results": [
+            {
+                "name": s.name,
+                "path": s.path,
+                "title": s.metadata.get("title", s.name),
+            }
+            for s in results
+        ],
+        "query": q,
+    }
+
+
+@app.get("/skills/{skill_name}")
+async def get_skill(skill_name: str):
+    """Get details for a specific local skill."""
+    cache = get_skills_cache()
+    if not cache:
+        raise HTTPException(status_code=404, detail="Skills cache not initialized")
+
+    skill = cache.get_skill(skill_name)
+    if not skill:
+        raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+
+    return {
+        "name": skill.name,
+        "path": skill.path,
+        "content": skill.content,
+        "metadata": skill.metadata,
+        "content_hash": skill.content_hash,
+    }
+
+
+@app.post("/skills/refresh")
+async def refresh_skills():
+    """Refresh the local skills cache."""
+    cache = get_skills_cache()
+    if not cache:
+        raise HTTPException(status_code=500, detail="Skills cache not initialized")
+
+    changes = await cache.refresh()
+    return {"changes": changes}
+
+
+# =========================================================================
+# SkillsMP Marketplace Endpoints
+# =========================================================================
+
+
+@app.get("/skillsmp")
+async def skillsmp_summary():
+    """Get SkillsMP cache summary."""
+    cache = get_skillsmp_cache()
+    if not cache:
+        return {"enabled": False, "message": "SkillsMP not configured (API key missing)"}
+
+    return {
+        "enabled": True,
+        "summary": cache.get_summary(),
+        "categories": cache.get_categories(),
+    }
+
+
+@app.get("/skillsmp/search")
+async def skillsmp_search(q: str, limit: int = 20, use_ai: bool = False):
+    """Search SkillsMP marketplace.
+
+    Args:
+        q: Search query
+        limit: Max results to return
+        use_ai: Use AI semantic search (requires API call) vs local keyword search
+    """
+    cache = get_skillsmp_cache()
+    if not cache:
+        raise HTTPException(status_code=503, detail="SkillsMP not configured")
+
+    if use_ai:
+        results = await cache.ai_search(q)
+    else:
+        results = await cache.search(q, limit=limit)
+
+    return {
+        "results": [
+            {
+                "id": s.id,
+                "name": s.name,
+                "description": s.description,
+                "author": s.author,
+                "stars": s.stars,
+                "category": s.category,
+                "repo_url": s.repo_url,
+                "score": cache.score_skill(s),
+            }
+            for s in results[:limit]
+        ],
+        "query": q,
+        "mode": "ai" if use_ai else "keyword",
+    }
+
+
+@app.get("/skillsmp/best")
+async def skillsmp_best(limit: int = 50):
+    """Get top-rated skills from SkillsMP by quality score."""
+    cache = get_skillsmp_cache()
+    if not cache:
+        raise HTTPException(status_code=503, detail="SkillsMP not configured")
+
+    best = cache.get_best_skills(limit=limit)
+    return {
+        "skills": [
+            {
+                "id": skill.id,
+                "name": skill.name,
+                "description": skill.description,
+                "author": skill.author,
+                "stars": skill.stars,
+                "category": skill.category,
+                "repo_url": skill.repo_url,
+                "score": score,
+            }
+            for skill, score in best
+        ],
+        "total": len(best),
+    }
+
+
+@app.get("/skillsmp/skill/{skill_id}")
+async def skillsmp_get_skill(skill_id: str):
+    """Get details for a specific SkillsMP skill."""
+    cache = get_skillsmp_cache()
+    if not cache:
+        raise HTTPException(status_code=503, detail="SkillsMP not configured")
+
+    skill = cache.get_skill(skill_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail=f"Skill '{skill_id}' not found")
+
+    return {
+        "id": skill.id,
+        "name": skill.name,
+        "description": skill.description,
+        "author": skill.author,
+        "stars": skill.stars,
+        "category": skill.category,
+        "tags": skill.tags,
+        "repo_url": skill.repo_url,
+        "created_at": skill.created_at,
+        "updated_at": skill.updated_at,
+        "score": cache.score_skill(skill),
+    }
+
+
+@app.post("/skillsmp/refresh")
+async def skillsmp_refresh():
+    """Manually refresh SkillsMP cache."""
+    cache = get_skillsmp_cache()
+    if not cache:
+        raise HTTPException(status_code=503, detail="SkillsMP not configured")
+
+    count = await cache.fetch_all_skills()
+    return {"refreshed": True, "total_skills": count}
 
 
 def run():

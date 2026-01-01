@@ -120,6 +120,7 @@ class BatonAuth:
             "groq": ["Groq API", "groq-api"],
             "together": ["Together API", "together-api"],
             "openrouter": ["OpenRouter API", "openrouter-api"],
+            "skillsmp": ["SkillsMP API", "skillsmp-api", "SkillsMP"],
         }
 
         item_names = bw_items.get(provider.lower(), [f"{provider} API"])

@@ -198,6 +198,47 @@ blocked_patterns = []
 # to_number = ""
 
 # ============================================
+# SKILLS CACHE
+# ============================================
+# Local skill discovery and caching
+
+[skills]
+enabled = true
+cache_file = "~/.baton/skills_cache.json"
+skill_paths = [
+    "~/.claude/skills",
+    "~/maestro/.claude/skills",
+    "~/libretto/.claude/skills",
+]
+refresh_interval = 3600  # 1 hour
+
+# ============================================
+# SKILLSMP MARKETPLACE
+# ============================================
+# SkillsMP.com marketplace cache (38k+ skills)
+# API key stored in Bitwarden as "SkillsMP API"
+
+[skillsmp]
+enabled = true
+cache_file = "~/.baton/skillsmp_cache.json"
+refresh_interval = 86400  # 24 hours (daily refresh)
+
+# Trusted authors get +25 quality score points
+trusted_authors = ["anthropic", "anthropics"]
+
+# Known organizations get +15 quality score points
+known_orgs = [
+    "danielmiessler",
+    "github",
+    "microsoft",
+    "google",
+    "openai",
+    "vercel",
+    "stripe",
+    "cloudflare",
+]
+
+# ============================================
 # ZONES
 # ============================================
 # Per-zone configuration for different contexts

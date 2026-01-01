@@ -93,6 +93,32 @@ def get_default_config() -> dict[str, Any]:
             "require_approval": [],
             "blocked_patterns": [],
         },
+        "skills": {
+            "enabled": True,
+            "cache_file": "~/.baton/skills_cache.json",
+            "skill_paths": [
+                "~/.claude/skills",
+                "~/maestro/.claude/skills",
+                "~/libretto/.claude/skills",
+            ],
+            "refresh_interval": 3600,  # 1 hour
+        },
+        "skillsmp": {
+            "enabled": True,
+            "cache_file": "~/.baton/skillsmp_cache.json",
+            "refresh_interval": 86400,  # 24 hours
+            "trusted_authors": ["anthropic", "anthropics"],
+            "known_orgs": [
+                "danielmiessler",
+                "github",
+                "microsoft",
+                "google",
+                "openai",
+                "vercel",
+                "stripe",
+                "cloudflare",
+            ],
+        },
     }
 
 

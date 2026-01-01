@@ -877,6 +877,118 @@ async def skillsmp_refresh():
     return {"refreshed": True, "total_skills": count}
 
 
+# =========================================================================
+# Zones Endpoints
+# =========================================================================
+
+
+@app.get("/zones")
+async def list_zones():
+    """List all configured zones."""
+    if not zones:
+        return {"zones": [], "current": None}
+
+    zone_list = []
+    for name, zone_config in zones.zones.items():
+        zone_list.append({
+            "name": name,
+            "default_model": zone_config.get("default_model"),
+            "default_alias": zone_config.get("default_alias", "smart"),
+            "default_temperature": zone_config.get("default_temperature", 0.7),
+            "preferred_auth": zone_config.get("preferred_auth"),
+            "blocked_providers": zone_config.get("blocked_providers", []),
+        })
+
+    return {
+        "zones": zone_list,
+        "current": zones.get_current_zone(),
+        "session": zones.get_current_session(),
+    }
+
+
+@app.get("/zones/current")
+async def get_current_zone():
+    """Get current zone from environment."""
+    if not zones:
+        return {"zone": None, "session": None, "config": {}}
+
+    current = zones.get_current_zone()
+    return {
+        "zone": current,
+        "session": zones.get_current_session(),
+        "config": zones.get_zone_config(current) if current else {},
+    }
+
+
+@app.get("/zones/{zone_name}")
+async def get_zone(zone_name: str):
+    """Get configuration for a specific zone."""
+    if not zones:
+        raise HTTPException(status_code=503, detail="Zones not configured")
+
+    zone_config = zones.get_zone_config(zone_name)
+    if not zone_config:
+        raise HTTPException(status_code=404, detail=f"Zone '{zone_name}' not found")
+
+    return {
+        "name": zone_name,
+        "config": zone_config,
+        "default_model": zones.get_default_model(zone_name),
+        "default_alias": zones.get_default_alias(zone_name),
+        "allowed_providers": zones.get_allowed_providers(zone_name),
+        "blocked_providers": zones.get_blocked_providers(zone_name),
+        "cost_limit": zones.get_cost_limit(zone_name),
+        "rate_limit_rpm": zones.get_rate_limit(zone_name),
+    }
+
+
+class ZoneSwitchRequest(BaseModel):
+    """Request to switch zones."""
+
+    zone: str
+
+
+@app.post("/zones/switch")
+async def switch_zone(request: ZoneSwitchRequest):
+    """Generate environment variables to switch to a zone.
+
+    Returns shell commands that can be eval'd to switch zones.
+    Note: This doesn't actually change the server's zone - it returns
+    env vars for the client to set.
+    """
+    if not zones:
+        raise HTTPException(status_code=503, detail="Zones not configured")
+
+    zone_name = request.zone
+    zone_config = zones.get_zone_config(zone_name)
+    if not zone_config:
+        raise HTTPException(status_code=404, detail=f"Zone '{zone_name}' not found")
+
+    # Build environment variables to set
+    env_vars = {
+        "MAESTRO_ZONE": zone_name,
+    }
+
+    # Add zone-specific env vars if configured
+    zone_env = zone_config.get("env", {})
+    env_vars.update(zone_env)
+
+    # Generate shell export command
+    export_lines = [f'export {k}="{v}"' for k, v in env_vars.items()]
+    export_cmd = "\n".join(export_lines)
+
+    return {
+        "zone": zone_name,
+        "env_vars": env_vars,
+        "export_cmd": export_cmd,
+        "config": {
+            "default_model": zones.get_default_model(zone_name),
+            "default_alias": zones.get_default_alias(zone_name),
+            "preferred_auth": zone_config.get("preferred_auth"),
+        },
+    }
+
+
 def run():
     """Run the server."""
     import uvicorn

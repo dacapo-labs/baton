@@ -9,18 +9,24 @@ from typing import Any
 import tomli
 
 # Config search paths (in priority order)
-CONFIG_PATHS = [
-    Path(os.environ.get("BATON_CONFIG", "")),
-    Path.home() / ".config" / "lifemaestro" / "baton.toml",
-    Path.home() / ".config" / "baton" / "config.toml",
-    Path("/etc/baton/config.toml"),
-]
+def _get_config_paths() -> list[Path]:
+    """Build config search paths."""
+    paths = []
+    env_config = os.environ.get("BATON_CONFIG", "")
+    if env_config:  # Only add if actually set
+        paths.append(Path(env_config))
+    paths.extend([
+        Path.home() / ".config" / "lifemaestro" / "baton.toml",
+        Path.home() / ".config" / "baton" / "config.toml",
+        Path("/etc/baton/config.toml"),
+    ])
+    return paths
 
 
 def find_config() -> Path | None:
     """Find the first existing config file."""
-    for path in CONFIG_PATHS:
-        if path and path.exists():
+    for path in _get_config_paths():
+        if path.is_file():  # Must be a file, not directory
             return path
     return None
 

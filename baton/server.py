@@ -233,6 +233,341 @@ async def health_check():
     }
 
 
+# =========================================================================
+# Unified Status & Config Endpoints (P5)
+# =========================================================================
+
+
+@app.get("/status")
+async def unified_status():
+    """Unified status dashboard - single endpoint for all system status.
+
+    Returns zone, credentials, rate limits, updates, and plugin status
+    in a single call. Ideal for CLI tools and dashboards.
+    """
+    status = {
+        "version": "0.1.0",
+        "uptime": None,  # Would need app start time
+    }
+
+    # Zone info
+    if zones:
+        status["zone"] = {
+            "current": zones.get_current_zone(),
+            "session": zones.get_current_session(),
+        }
+    else:
+        status["zone"] = {"current": None, "session": None}
+
+    # Credentials health
+    if keepalive:
+        health = keepalive.get_health()
+        cred_statuses = keepalive.get_status().get("credentials", {})
+        status["credentials"] = {
+            "healthy": health["healthy"],
+            "healthy_count": health["healthy_count"],
+            "unhealthy_count": health["unhealthy_count"],
+            "expiring_soon": [
+                k for k, v in cred_statuses.items()
+                if v.get("status") == "expiring"
+            ],
+        }
+    else:
+        # Fallback: check API keys
+        creds = {}
+        for provider in ["anthropic", "openai", "google"]:
+            key = auth.get_api_key(provider) if auth else None
+            creds[provider] = "configured" if key else "missing"
+        status["credentials"] = {"providers": creds}
+
+    # Rate limits summary
+    if rate_limiter:
+        all_status = rate_limiter.get_all_status()
+        near_limit = [
+            k for k, v in all_status.items()
+            if v.get("rpm_usage_pct", 0) > 80 or v.get("tokens_usage_pct", 0) > 80
+        ]
+        status["rate_limits"] = {
+            "tracked_keys": len(all_status),
+            "near_limit": near_limit,
+        }
+    else:
+        status["rate_limits"] = {"enabled": False}
+
+    # Updates summary
+    if version_checker:
+        summary = version_checker.get_summary()
+        status["updates"] = {
+            "outdated_count": summary.get("outdated_count", 0),
+            "outdated_tools": summary.get("outdated_tools", []),
+        }
+    else:
+        status["updates"] = {"enabled": False}
+
+    # Repos with pending updates
+    if repo_updater:
+        repos_summary = repo_updater.get_summary()
+        status["repos"] = {
+            "tracked": repos_summary.get("total", 0),
+            "with_updates": repos_summary.get("with_updates", 0),
+        }
+    else:
+        status["repos"] = {"enabled": False}
+
+    # Skills summary
+    local_count = 0
+    if skills_cache:
+        local_count = len(skills_cache.get_all_skills())
+
+    mp_count = 0
+    if skillsmp_cache:
+        mp_summary = skillsmp_cache.get_summary()
+        mp_count = mp_summary.get("total", 0)
+
+    status["skills"] = {
+        "local": local_count,
+        "marketplace": mp_count,
+    }
+
+    # Plugin status
+    status["plugins"] = {
+        "auth": auth is not None,
+        "logger": logger is not None,
+        "judge": judge is not None,
+        "fanout": fanout is not None,
+        "zones": zones is not None,
+        "router": router is not None,
+        "guardrails": guardrails is not None,
+        "rate_limiter": rate_limiter is not None,
+        "model_checker": model_checker is not None,
+        "model_monitor": model_monitor is not None,
+        "version_checker": version_checker is not None,
+        "repo_updater": repo_updater is not None,
+        "twilio": twilio is not None and twilio.enabled,
+        "keepalive": keepalive is not None,
+        "skills_cache": skills_cache is not None,
+        "skillsmp_cache": skillsmp_cache is not None,
+        "cli_auth": cli_auth is not None,
+    }
+
+    return status
+
+
+@app.get("/config")
+async def get_config():
+    """Get full baton configuration as JSON.
+
+    Returns the complete config (minus secrets) for inspection
+    or for CLI tools that need to read settings.
+    """
+    # Return config with secrets redacted
+    safe_config = _redact_secrets(dict(config))
+    return {"config": safe_config}
+
+
+@app.get("/config/{key:path}")
+async def get_config_key(key: str):
+    """Get a specific config value by dot-notation path.
+
+    Examples:
+        /config/ai.default_provider
+        /config/zones.personal.git.email
+        /config/keepalive.enabled
+    """
+    parts = key.split(".")
+    value = config
+
+    for part in parts:
+        if isinstance(value, dict):
+            if part not in value:
+                raise HTTPException(status_code=404, detail=f"Config key '{key}' not found")
+            value = value[part]
+        else:
+            raise HTTPException(status_code=404, detail=f"Config key '{key}' not found")
+
+    # Redact if it looks like a secret
+    if _is_secret_key(key):
+        value = "[REDACTED]"
+
+    return {"key": key, "value": value}
+
+
+def _redact_secrets(obj: dict, path: str = "") -> dict:
+    """Recursively redact secret values from config."""
+    result = {}
+    for k, v in obj.items():
+        full_key = f"{path}.{k}" if path else k
+        if isinstance(v, dict):
+            result[k] = _redact_secrets(v, full_key)
+        elif _is_secret_key(full_key) or _is_secret_key(k):
+            result[k] = "[REDACTED]"
+        else:
+            result[k] = v
+    return result
+
+
+def _is_secret_key(key: str) -> bool:
+    """Check if a key looks like it contains secrets."""
+    secret_patterns = [
+        "api_key", "apikey", "secret", "token", "password",
+        "auth_token", "access_key", "private_key", "credential",
+        "account_sid", "auth_token",
+    ]
+    key_lower = key.lower()
+    return any(p in key_lower for p in secret_patterns)
+
+
+@app.get("/doctor")
+async def doctor_health_check():
+    """Comprehensive health check - checks all systems and returns issues.
+
+    Like `maestro doctor` but as an API endpoint. Returns structured
+    results suitable for both human display and automation.
+    """
+    checks = []
+    errors = 0
+    warnings = 0
+
+    # Check required dependencies (via checking plugin availability)
+    checks.append({
+        "name": "Core Plugins",
+        "status": "ok" if auth and logger and zones else "error",
+        "details": {
+            "auth": "ok" if auth else "missing",
+            "logger": "ok" if logger else "missing",
+            "zones": "ok" if zones else "missing",
+        }
+    })
+    if not auth or not logger or not zones:
+        errors += 1
+
+    # Check credentials
+    cred_check = {"name": "Credentials", "status": "ok", "details": {}}
+    if keepalive:
+        health = keepalive.get_health()
+        if not health["healthy"]:
+            cred_check["status"] = "warning" if health["healthy_count"] > 0 else "error"
+            cred_check["details"]["unhealthy"] = health.get("unhealthy", [])
+            if health["healthy_count"] == 0:
+                errors += 1
+            else:
+                warnings += 1
+        else:
+            cred_check["details"]["healthy_count"] = health["healthy_count"]
+    else:
+        # Check API keys directly
+        for provider in ["anthropic", "openai", "google"]:
+            key = auth.get_api_key(provider) if auth else None
+            cred_check["details"][provider] = "configured" if key else "missing"
+    checks.append(cred_check)
+
+    # Check CLI auth (OAuth)
+    cli_check = {"name": "CLI OAuth", "status": "ok", "details": {}}
+    if cli_auth:
+        for provider_name in ["anthropic", "openai", "google"]:
+            try:
+                cli_provider = cli_auth.get_provider(provider_name)
+                if cli_provider:
+                    if cli_provider.is_installed():
+                        status = await cli_provider.check_auth()
+                        if status and status.authenticated:
+                            cli_check["details"][provider_name] = {
+                                "authenticated": True,
+                                "user": status.user,
+                            }
+                        else:
+                            cli_check["details"][provider_name] = {"authenticated": False}
+                    else:
+                        cli_check["details"][provider_name] = {"installed": False}
+            except Exception as e:
+                cli_check["details"][provider_name] = {"error": str(e)}
+    else:
+        cli_check["status"] = "skipped"
+        cli_check["details"]["message"] = "CLI auth not initialized"
+    checks.append(cli_check)
+
+    # Check rate limits
+    rate_check = {"name": "Rate Limits", "status": "ok", "details": {}}
+    if rate_limiter:
+        all_status = rate_limiter.get_all_status()
+        near_limit = []
+        for k, v in all_status.items():
+            rpm_pct = v.get("rpm_usage_pct", 0)
+            tok_pct = v.get("tokens_usage_pct", 0)
+            if rpm_pct > 90 or tok_pct > 90:
+                near_limit.append(k)
+        if near_limit:
+            rate_check["status"] = "warning"
+            rate_check["details"]["near_limit"] = near_limit
+            warnings += 1
+        rate_check["details"]["tracked"] = len(all_status)
+    else:
+        rate_check["status"] = "skipped"
+    checks.append(rate_check)
+
+    # Check version updates
+    update_check = {"name": "Tool Updates", "status": "ok", "details": {}}
+    if version_checker:
+        outdated = version_checker.get_outdated()
+        if outdated:
+            update_check["status"] = "info"
+            update_check["details"]["outdated"] = [v.name for v in outdated[:5]]
+            update_check["details"]["outdated_count"] = len(outdated)
+    else:
+        update_check["status"] = "skipped"
+    checks.append(update_check)
+
+    # Check repo updates
+    repo_check = {"name": "Repository Updates", "status": "ok", "details": {}}
+    if repo_updater:
+        summary = repo_updater.get_summary()
+        if summary.get("with_updates", 0) > 0:
+            repo_check["status"] = "info"
+            repo_check["details"]["with_updates"] = summary["with_updates"]
+    else:
+        repo_check["status"] = "skipped"
+    checks.append(repo_check)
+
+    # Check skills
+    skills_check = {"name": "Skills", "status": "ok", "details": {}}
+    if skills_cache:
+        skills_check["details"]["local"] = len(skills_cache.get_all_skills())
+    if skillsmp_cache:
+        mp_summary = skillsmp_cache.get_summary()
+        skills_check["details"]["marketplace"] = mp_summary.get("total", 0)
+    if not skills_cache and not skillsmp_cache:
+        skills_check["status"] = "skipped"
+    checks.append(skills_check)
+
+    # Check Twilio (notifications)
+    notify_check = {"name": "Notifications (Twilio)", "status": "ok", "details": {}}
+    if twilio:
+        if twilio.enabled:
+            notify_check["details"]["configured"] = True
+            notify_check["details"]["to_configured"] = twilio.is_configured()
+        else:
+            notify_check["status"] = "skipped"
+            notify_check["details"]["message"] = "Not configured"
+    else:
+        notify_check["status"] = "skipped"
+    checks.append(notify_check)
+
+    # Overall status
+    if errors > 0:
+        overall = "unhealthy"
+    elif warnings > 0:
+        overall = "degraded"
+    else:
+        overall = "healthy"
+
+    return {
+        "status": overall,
+        "errors": errors,
+        "warnings": warnings,
+        "checks": checks,
+    }
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatRequest, raw_request: Request):
     """OpenAI-compatible chat completions endpoint."""

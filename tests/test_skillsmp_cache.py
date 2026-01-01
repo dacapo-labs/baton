@@ -319,6 +319,138 @@ class TestSkillsMPCache:
         cache._last_updated = time.time() - 7200
         assert cache.needs_refresh() is True
 
+    def test_days_since(self):
+        """Test days since calculation."""
+        config = SkillsMPCacheConfig(api_key="test-key")
+        cache = SkillsMPCache(config)
+
+        # Unknown date
+        assert cache._days_since(None) == 9999
+        assert cache._days_since("") == 9999
+
+        # Recent date (today-ish format)
+        from datetime import datetime, timedelta
+        recent = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
+        days = cache._days_since(recent)
+        assert 9 <= days <= 11  # Allow for timing
+
+    def test_score_skill_recency(self):
+        """Test scoring based on recency."""
+        config = SkillsMPCacheConfig(api_key="test-key")
+        cache = SkillsMPCache(config)
+
+        from datetime import datetime, timedelta
+
+        # Very recent (< 90 days) - should get 40 points
+        recent = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        skill = SkillsMPSkill(id="s1", name="S1", description="", updated_at=recent, stars=0)
+        score = cache.score_skill(skill)
+        assert score >= 40  # At least recency points
+
+        # Old (> 1 year) - should get 0 recency points
+        old = (datetime.now() - timedelta(days=400)).strftime("%Y-%m-%d")
+        skill_old = SkillsMPSkill(id="s2", name="S2", description="", updated_at=old, stars=0)
+        score_old = cache.score_skill(skill_old)
+        assert score_old < 40  # No recency bonus
+
+    def test_score_skill_stars(self):
+        """Test scoring based on stars."""
+        config = SkillsMPCacheConfig(api_key="test-key")
+        cache = SkillsMPCache(config)
+
+        # 0 stars
+        skill_0 = SkillsMPSkill(id="s1", name="S1", description="", stars=0)
+        # 100 stars
+        skill_100 = SkillsMPSkill(id="s2", name="S2", description="", stars=100)
+        # 1000 stars
+        skill_1000 = SkillsMPSkill(id="s3", name="S3", description="", stars=1000)
+
+        score_0 = cache.score_skill(skill_0)
+        score_100 = cache.score_skill(skill_100)
+        score_1000 = cache.score_skill(skill_1000)
+
+        # More stars = higher score
+        assert score_100 > score_0
+        assert score_1000 > score_100
+
+    def test_score_skill_author_trust(self):
+        """Test scoring based on author trust."""
+        config = SkillsMPCacheConfig(api_key="test-key")
+        cache = SkillsMPCache(config)
+
+        # Trusted author (anthropic)
+        skill_trusted = SkillsMPSkill(
+            id="s1", name="S1", description="", author="anthropic", stars=0
+        )
+        # Known org (github)
+        skill_known = SkillsMPSkill(
+            id="s2", name="S2", description="", author="github", stars=0
+        )
+        # Unknown author
+        skill_unknown = SkillsMPSkill(
+            id="s3", name="S3", description="", author="random-person", stars=0
+        )
+
+        score_trusted = cache.score_skill(skill_trusted)
+        score_known = cache.score_skill(skill_known)
+        score_unknown = cache.score_skill(skill_unknown)
+
+        # Trusted > Known > Unknown
+        assert score_trusted > score_known
+        assert score_known > score_unknown
+
+    def test_get_best_skills(self):
+        """Test getting skills sorted by quality score."""
+        config = SkillsMPCacheConfig(api_key="test-key")
+        cache = SkillsMPCache(config)
+
+        from datetime import datetime, timedelta
+        recent = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+
+        # High score: recent + trusted + stars
+        cache._skills["high"] = SkillsMPSkill(
+            id="high", name="High", description="",
+            author="anthropic", stars=100, updated_at=recent
+        )
+        # Low score: old + unknown + no stars
+        cache._skills["low"] = SkillsMPSkill(
+            id="low", name="Low", description="",
+            author="nobody", stars=0, updated_at="2020-01-01"
+        )
+
+        best = cache.get_best_skills(limit=2)
+        assert len(best) == 2
+        assert best[0][0].id == "high"
+        assert best[0][1] > best[1][1]  # Higher score first
+
+    def test_custom_trust_lists(self):
+        """Test custom trusted authors and known orgs."""
+        config = SkillsMPCacheConfig(
+            api_key="test-key",
+            trusted_authors={"my-company"},
+            known_orgs={"partner-org"},
+        )
+        cache = SkillsMPCache(config)
+
+        skill_custom_trusted = SkillsMPSkill(
+            id="s1", name="S1", description="", author="my-company", stars=0
+        )
+        skill_custom_known = SkillsMPSkill(
+            id="s2", name="S2", description="", author="partner-org", stars=0
+        )
+        skill_default_trusted = SkillsMPSkill(
+            id="s3", name="S3", description="", author="anthropic", stars=0
+        )
+
+        # Custom trusted should score highest
+        score_custom = cache.score_skill(skill_custom_trusted)
+        score_known = cache.score_skill(skill_custom_known)
+        # Default trusted (anthropic) not in custom list
+        score_default = cache.score_skill(skill_default_trusted)
+
+        assert score_custom > score_known
+        assert score_custom > score_default  # Custom config overrides default
+
     @pytest.mark.asyncio
     async def test_search(self):
         """Test local search."""

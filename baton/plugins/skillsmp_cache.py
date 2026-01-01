@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -20,6 +22,24 @@ import httpx
 
 SKILLSMP_API_BASE = "https://skillsmp.com/api/v1"
 DEFAULT_CACHE_FILE = "~/.baton/skillsmp_cache.json"
+
+# Default trusted authors (highest trust)
+DEFAULT_TRUSTED_AUTHORS = {
+    "anthropic",
+    "anthropics",
+}
+
+# Default known organizations (medium trust)
+DEFAULT_KNOWN_ORGS = {
+    "danielmiessler",
+    "github",
+    "microsoft",
+    "google",
+    "openai",
+    "vercel",
+    "stripe",
+    "cloudflare",
+}
 
 
 @dataclass
@@ -96,6 +116,9 @@ class SkillsMPCacheConfig:
     refresh_interval: int = 86400  # 24 hours
     page_size: int = 100  # Max allowed by API
     notify_callback: Callable[[str, Any], None] | None = None
+    # Trust lists for scoring
+    trusted_authors: set[str] = field(default_factory=lambda: DEFAULT_TRUSTED_AUTHORS.copy())
+    known_orgs: set[str] = field(default_factory=lambda: DEFAULT_KNOWN_ORGS.copy())
 
 
 class SkillsMPCache:
@@ -336,6 +359,64 @@ class SkillsMPCache:
             reverse=True,
         )
         return sorted_skills[:limit]
+
+    def _days_since(self, date_str: str | None) -> int:
+        """Calculate days since a date string."""
+        if not date_str:
+            return 9999  # Unknown = very old
+
+        try:
+            # Try common formats
+            for fmt in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ"]:
+                try:
+                    dt = datetime.strptime(date_str[:19], fmt[:len(date_str)])
+                    return (datetime.now() - dt).days
+                except ValueError:
+                    continue
+            return 9999
+        except Exception:
+            return 9999
+
+    def score_skill(self, skill: SkillsMPSkill) -> int:
+        """
+        Calculate quality score for a skill (0-100).
+
+        Scoring:
+        - Recency (0-40): Updated <90d=40, <180d=25, <1yr=10, older=0
+        - Stars (0-35): log10(stars+1) * 12, capped at 35
+        - Author Trust (0-25): Trusted=25, Known org=15, Unknown=0
+        """
+        score = 0
+
+        # Recency (0-40)
+        days_old = self._days_since(skill.updated_at)
+        if days_old < 90:
+            score += 40
+        elif days_old < 180:
+            score += 25
+        elif days_old < 365:
+            score += 10
+        # else: 0
+
+        # Stars (0-35)
+        star_score = min(math.log10(skill.stars + 1) * 12, 35)
+        score += int(star_score)
+
+        # Author trust (0-25)
+        author = (skill.author or "").lower()
+        if author in self.config.trusted_authors:
+            score += 25
+        elif author in self.config.known_orgs:
+            score += 15
+        # else: 0
+
+        return score
+
+    def get_best_skills(self, limit: int = 100) -> list[tuple[SkillsMPSkill, int]]:
+        """Get skills sorted by quality score."""
+        scored = [(skill, self.score_skill(skill)) for skill in self._skills.values()]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:limit]
 
     def get_categories(self) -> dict[str, int]:
         """Get all categories with counts."""

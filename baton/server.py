@@ -16,6 +16,11 @@ from pydantic import BaseModel
 from .config import load_config
 from .plugins import BatonAuth, BatonFanout, BatonJudge, BatonLogger, BatonZones
 from .plugins.fanout import FanoutMode
+from .plugins.router import BatonRouter
+from .plugins.guardrails import BatonGuardrails
+from .plugins.rate_limits import get_rate_limiter, init_rate_limiter, RateLimitTracker
+from .plugins.model_checker import get_model_checker, init_model_checker, ModelAvailabilityChecker
+from .plugins.model_monitor import get_model_monitor, init_model_monitor, ModelMonitor, MonitorConfig
 from .plugins.skills_cache import (
     SkillsCache,
     SkillsCacheConfig,
@@ -58,6 +63,11 @@ logger: BatonLogger | None = None
 judge: BatonJudge | None = None
 fanout: BatonFanout | None = None
 zones: BatonZones | None = None
+router: BatonRouter | None = None
+guardrails: BatonGuardrails | None = None
+rate_limiter: RateLimitTracker | None = None
+model_checker: ModelAvailabilityChecker | None = None
+model_monitor: ModelMonitor | None = None
 skills_cache: SkillsCache | None = None
 skillsmp_cache: SkillsMPCache | None = None
 keepalive: KeepaliveDaemon | None = None
@@ -67,7 +77,8 @@ cli_auth: CLIAuthManager | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    global config, auth, logger, judge, fanout, zones, skills_cache, skillsmp_cache, keepalive, cli_auth
+    global config, auth, logger, judge, fanout, zones, router, guardrails, rate_limiter
+    global model_checker, model_monitor, skills_cache, skillsmp_cache, keepalive, cli_auth
 
     config = load_config()
 
@@ -76,6 +87,21 @@ async def lifespan(app: FastAPI):
     judge = BatonJudge(config, logger)
     fanout = BatonFanout(config, judge)
     zones = BatonZones(config)
+    router = BatonRouter(config)
+    guardrails = BatonGuardrails(config, logger)
+    rate_limiter = init_rate_limiter(config.get("rate_limits"))
+    model_checker = init_model_checker(config.get("model_checker", {}))
+
+    # Initialize model monitor
+    monitor_config = config.get("model_monitor", {})
+    if monitor_config.get("enabled", False):
+        model_monitor = init_model_monitor(MonitorConfig(
+            check_interval=monitor_config.get("check_interval", 3600),
+            state_file=monitor_config.get("state_file"),
+            check_bedrock=monitor_config.get("check_bedrock", True),
+            check_vertex=monitor_config.get("check_vertex", True),
+        ))
+        model_monitor.start()
 
     env_vars = auth.export_env_vars()
     for key, value in env_vars.items():
@@ -126,6 +152,8 @@ async def lifespan(app: FastAPI):
     # Cleanup
     if keepalive:
         keepalive.stop()
+    if model_monitor:
+        model_monitor.stop()
     await stop_skills_cache()
     await stop_skillsmp_cache()
 
@@ -986,6 +1014,446 @@ async def switch_zone(request: ZoneSwitchRequest):
             "default_alias": zones.get_default_alias(zone_name),
             "preferred_auth": zone_config.get("preferred_auth"),
         },
+    }
+
+
+# =========================================================================
+# Fanout Endpoints
+# =========================================================================
+
+
+class FanoutRequest(BaseModel):
+    """Request for fan-out query."""
+
+    models: list[str]
+    messages: list[dict[str, Any]]
+    mode: str = "first"  # first, all, race, vote, judge
+    temperature: float | None = None
+    max_tokens: int | None = None
+
+
+@app.post("/fanout")
+async def fanout_query(request: FanoutRequest):
+    """Execute a fan-out query across multiple models."""
+    if not fanout:
+        raise HTTPException(status_code=503, detail="Fanout not initialized")
+
+    try:
+        mode = FanoutMode(request.mode)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid mode: {request.mode}")
+
+    params = {}
+    if request.temperature is not None:
+        params["temperature"] = request.temperature
+    if request.max_tokens is not None:
+        params["max_tokens"] = request.max_tokens
+
+    result = await fanout.execute(
+        models=request.models,
+        messages=request.messages,
+        params=params,
+        mode=mode,
+    )
+
+    return result
+
+
+@app.get("/fanout/modes")
+async def fanout_modes():
+    """List available fan-out modes."""
+    return {
+        "modes": [
+            {"name": "first", "description": "Return first successful response"},
+            {"name": "all", "description": "Return all responses"},
+            {"name": "race", "description": "Return fastest response"},
+            {"name": "vote", "description": "Majority vote (for classification)"},
+            {"name": "judge", "description": "Use judge model to pick best"},
+        ]
+    }
+
+
+@app.get("/fanout/aliases")
+async def fanout_aliases():
+    """List configured model aliases for fan-out."""
+    aliases = config.get("aliases", {})
+    return {"aliases": aliases}
+
+
+# =========================================================================
+# Router Endpoints
+# =========================================================================
+
+
+@app.get("/router/stats")
+async def router_stats():
+    """Get routing statistics based on learned judge patterns."""
+    if not router:
+        return {"enabled": False, "message": "Router not initialized"}
+
+    return {
+        "enabled": True,
+        "stats": router.get_routing_stats(),
+    }
+
+
+@app.get("/router/best")
+async def router_best_model(
+    query_type: str,
+    models: str | None = None,
+    fallback: str | None = None,
+):
+    """Get the best model for a query type based on learned patterns.
+
+    Args:
+        query_type: Type of query (code, explanation, creative, analysis, etc.)
+        models: Comma-separated list of available models
+        fallback: Fallback model if no data available
+    """
+    if not router:
+        raise HTTPException(status_code=503, detail="Router not initialized")
+
+    available = models.split(",") if models else []
+    best = router.get_best_model(query_type, available, fallback)
+
+    return {
+        "query_type": query_type,
+        "best_model": best,
+        "has_data": router.should_use_adaptive(query_type),
+    }
+
+
+@app.get("/router/suggest")
+async def router_suggest_models(
+    query_type: str,
+    models: str | None = None,
+    top_n: int = 3,
+):
+    """Suggest top models for fan-out based on win rates."""
+    if not router:
+        raise HTTPException(status_code=503, detail="Router not initialized")
+
+    available = models.split(",") if models else []
+    suggested = router.suggest_fanout_models(query_type, available, top_n)
+
+    return {
+        "query_type": query_type,
+        "suggested_models": suggested,
+        "top_n": top_n,
+    }
+
+
+@app.post("/router/refresh")
+async def router_refresh():
+    """Force refresh of routing statistics from logs."""
+    if not router:
+        raise HTTPException(status_code=503, detail="Router not initialized")
+
+    router.refresh_win_rates(force=True)
+    return {"refreshed": True, "stats": router.get_routing_stats()}
+
+
+# =========================================================================
+# Guardrails Endpoints
+# =========================================================================
+
+
+@app.get("/guardrails/stats")
+async def guardrails_stats():
+    """Get guardrails statistics."""
+    if not guardrails:
+        return {"enabled": False}
+
+    return {
+        "enabled": True,
+        "stats": guardrails.get_stats(),
+    }
+
+
+class GuardrailsValidateRequest(BaseModel):
+    """Request to validate against guardrails."""
+
+    messages: list[dict[str, Any]]
+    zone: str | None = None
+    action: str | None = None
+
+
+@app.post("/guardrails/validate")
+async def guardrails_validate(request: GuardrailsValidateRequest):
+    """Validate a request against guardrails.
+
+    Checks rate limits, content filters, and approval requirements.
+    """
+    if not guardrails:
+        return {"valid": True, "message": "Guardrails not enabled"}
+
+    valid, error = await guardrails.validate_request(
+        messages=request.messages,
+        zone=request.zone,
+        action=request.action,
+    )
+
+    return {
+        "valid": valid,
+        "error": error,
+    }
+
+
+@app.get("/guardrails/rate-limit")
+async def guardrails_rate_limit_check(zone: str | None = None):
+    """Check rate limit status for a zone."""
+    if not guardrails:
+        return {"allowed": True, "message": "Guardrails not enabled"}
+
+    allowed, error = guardrails.check_rate_limit(zone)
+    return {
+        "allowed": allowed,
+        "error": error,
+        "zone": zone or "default",
+    }
+
+
+# =========================================================================
+# Judge Endpoints
+# =========================================================================
+
+
+class JudgeRequest(BaseModel):
+    """Request for judge to select best response."""
+
+    messages: list[dict[str, Any]]
+    candidates: list[dict[str, str]]  # [{model: str, response: str}, ...]
+
+
+@app.post("/judge/select")
+async def judge_select_best(request: JudgeRequest):
+    """Use judge model to select best response from candidates."""
+    if not judge:
+        raise HTTPException(status_code=503, detail="Judge not initialized")
+
+    result = await judge.select_best(
+        messages=request.messages,
+        candidates=request.candidates,
+    )
+
+    return result
+
+
+class JudgeClassifyRequest(BaseModel):
+    """Request to classify a query."""
+
+    messages: list[dict[str, Any]]
+
+
+@app.post("/judge/classify")
+async def judge_classify_query(request: JudgeClassifyRequest):
+    """Classify a query type for routing decisions."""
+    if not judge:
+        raise HTTPException(status_code=503, detail="Judge not initialized")
+
+    query_type = await judge.classify_query(request.messages)
+    return {"query_type": query_type}
+
+
+@app.get("/judge/config")
+async def judge_config():
+    """Get judge configuration."""
+    if not judge:
+        return {"enabled": False}
+
+    return {
+        "enabled": True,
+        "judge_model": judge.judge_model,
+    }
+
+
+# =========================================================================
+# Rate Limits Endpoints
+# =========================================================================
+
+
+@app.get("/rate-limits")
+async def rate_limits_status():
+    """Get rate limit status for all tracked auth keys."""
+    if not rate_limiter:
+        return {"enabled": False}
+
+    return {
+        "enabled": True,
+        "statuses": rate_limiter.get_all_status(),
+    }
+
+
+@app.get("/rate-limits/{auth_key:path}")
+async def rate_limits_for_key(auth_key: str):
+    """Get rate limit status for a specific auth key.
+
+    Auth key format: provider/method or provider/method/plan
+    e.g., anthropic/oauth/pro, openai/api/tier3
+    """
+    if not rate_limiter:
+        raise HTTPException(status_code=503, detail="Rate limiter not initialized")
+
+    return rate_limiter.get_status(auth_key)
+
+
+class RateLimitCheckRequest(BaseModel):
+    """Request to check rate limit."""
+
+    auth_key: str
+    estimated_tokens: int = 0
+
+
+@app.post("/rate-limits/check")
+async def rate_limits_check(request: RateLimitCheckRequest):
+    """Check if a request would be within rate limits."""
+    if not rate_limiter:
+        return {"allowed": True, "message": "Rate limiter not enabled"}
+
+    allowed, reason, status = rate_limiter.check_limit(
+        request.auth_key, request.estimated_tokens
+    )
+
+    return {
+        "allowed": allowed,
+        "reason": reason,
+        "status": status,
+    }
+
+
+class RateLimitRecordRequest(BaseModel):
+    """Request to record a completed request."""
+
+    auth_key: str
+    tokens_used: int = 0
+
+
+@app.post("/rate-limits/record")
+async def rate_limits_record(request: RateLimitRecordRequest):
+    """Record a completed request for rate limiting."""
+    if not rate_limiter:
+        return {"recorded": False, "message": "Rate limiter not enabled"}
+
+    rate_limiter.record_request(request.auth_key, request.tokens_used)
+    return {"recorded": True}
+
+
+@app.post("/rate-limits/reset")
+async def rate_limits_reset(auth_key: str | None = None):
+    """Reset rate limit counters."""
+    if not rate_limiter:
+        raise HTTPException(status_code=503, detail="Rate limiter not initialized")
+
+    rate_limiter.reset(auth_key)
+    return {"reset": True, "auth_key": auth_key or "all"}
+
+
+# =========================================================================
+# Model Checker Endpoints
+# =========================================================================
+
+
+@app.get("/models/check")
+async def models_check(check_access: bool = False):
+    """Check model availability across all providers.
+
+    Args:
+        check_access: If true, actually test model access (slower)
+    """
+    if not model_checker:
+        raise HTTPException(status_code=503, detail="Model checker not initialized")
+
+    results = await model_checker.check_all(check_access=check_access)
+
+    # Convert to serializable format
+    serialized = {}
+    for platform, providers in results.items():
+        serialized[platform] = {}
+        for provider, models in providers.items():
+            serialized[platform][provider] = [m.to_dict() for m in models]
+
+    return {"results": serialized}
+
+
+@app.get("/models/accessible")
+async def models_accessible():
+    """Get list of accessible models by provider."""
+    if not model_checker:
+        raise HTTPException(status_code=503, detail="Model checker not initialized")
+
+    accessible = await model_checker.get_accessible_models()
+    return {"accessible": accessible}
+
+
+@app.get("/models/summary")
+async def models_summary():
+    """Get summary of model availability."""
+    if not model_checker:
+        raise HTTPException(status_code=503, detail="Model checker not initialized")
+
+    summary = await model_checker.get_summary()
+    return {"summary": summary}
+
+
+@app.get("/models/litellm")
+async def models_litellm_list():
+    """Get models in LiteLLM format."""
+    if not model_checker:
+        raise HTTPException(status_code=503, detail="Model checker not initialized")
+
+    models = model_checker.get_litellm_model_list()
+    return {"models": models}
+
+
+# =========================================================================
+# Model Monitor Endpoints
+# =========================================================================
+
+
+@app.get("/models/monitor")
+async def models_monitor_status():
+    """Get model monitor status."""
+    if not model_monitor:
+        return {"enabled": False, "message": "Model monitor not enabled"}
+
+    return {
+        "enabled": True,
+        "status": model_monitor.get_status(),
+    }
+
+
+@app.get("/models/monitor/changes")
+async def models_monitor_changes(hours: int = 24):
+    """Get recent model changes."""
+    if not model_monitor:
+        raise HTTPException(status_code=503, detail="Model monitor not enabled")
+
+    changes = model_monitor.get_recent_changes(hours)
+    return {
+        "changes": [c.to_dict() for c in changes],
+        "hours": hours,
+    }
+
+
+@app.get("/models/monitor/known")
+async def models_monitor_known():
+    """Get all known models being monitored."""
+    if not model_monitor:
+        raise HTTPException(status_code=503, detail="Model monitor not enabled")
+
+    return {"known_models": model_monitor.get_all_known_models()}
+
+
+@app.post("/models/monitor/check")
+async def models_monitor_check_now():
+    """Trigger immediate check for new models."""
+    if not model_monitor:
+        raise HTTPException(status_code=503, detail="Model monitor not enabled")
+
+    changes = await model_monitor.check_for_new_models()
+    return {
+        "checked": True,
+        "changes": [c.to_dict() for c in changes],
     }
 
 

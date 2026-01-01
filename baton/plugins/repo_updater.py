@@ -58,7 +58,24 @@ class RepoUpdaterConfig:
 
 # Well-known repos that can be auto-discovered or configured
 KNOWN_REPOS = {
+    # ==========================================================================
+    # Internal Repos (self-tracking)
+    # ==========================================================================
+    "baton": {
+        "url": "https://github.com/dacapo-labs/baton",
+        "description": "AI proxy gateway with multi-provider auth",
+    },
+    "maestro": {
+        "url": "https://github.com/dacapo-labs/maestro",
+        "description": "Shell orchestration and automation",
+    },
+    "libretto": {
+        "url": "https://github.com/dacapo-labs/libretto",
+        "description": "Configuration and dotfiles management",
+    },
+    # ==========================================================================
     # AI Tools
+    # ==========================================================================
     "pai": {
         "url": "https://github.com/anthropics/anthropic-quickstarts",
         "description": "Anthropic quickstarts and examples",
@@ -75,7 +92,9 @@ KNOWN_REPOS = {
         "url": "https://github.com/paul-gauthier/aider",
         "description": "AI pair programming tool",
     },
+    # ==========================================================================
     # Dev Tools
+    # ==========================================================================
     "oh-my-zsh": {
         "url": "https://github.com/ohmyzsh/ohmyzsh",
         "description": "Zsh configuration framework",

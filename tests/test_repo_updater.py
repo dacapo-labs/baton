@@ -370,6 +370,14 @@ class TestKnownRepos:
         for name in expected:
             assert name in KNOWN_REPOS, f"Missing known repo: {name}"
 
+    def test_internal_repos(self):
+        """Test internal repos (baton, maestro, libretto) are defined."""
+        internal = ["baton", "maestro", "libretto"]
+
+        for name in internal:
+            assert name in KNOWN_REPOS, f"Missing internal repo: {name}"
+            assert "dacapo-labs" in KNOWN_REPOS[name]["url"]
+
 
 class TestCloneRepo:
     """Tests for clone_repo function."""

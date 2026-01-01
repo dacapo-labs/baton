@@ -357,6 +357,93 @@ class TestCliToolDefinitions:
         for name in expected:
             assert name in CLI_TOOLS, f"Missing tool: {name}"
 
+    def test_all_tools_have_category(self):
+        """Test all tools have a category."""
+        for name, tool in CLI_TOOLS.items():
+            assert "category" in tool, f"{name} missing category"
+
+    def test_expected_categories(self):
+        """Test expected categories exist."""
+        categories = set()
+        for tool in CLI_TOOLS.values():
+            categories.add(tool.get("category"))
+
+        expected = {"ai", "cloud", "dev", "data", "security", "runtime", "testing", "comm"}
+        for cat in expected:
+            assert cat in categories, f"Missing category: {cat}"
+
+    def test_maestro_tools_included(self):
+        """Test tools from maestro are included."""
+        maestro_tools = ["fabric", "gh", "delta", "fzf", "jq", "dasel", "bw", "bun", "himalaya"]
+
+        for name in maestro_tools:
+            assert name in CLI_TOOLS, f"Missing maestro tool: {name}"
+
+    def test_github_release_tools_have_repo(self):
+        """Test tools using GitHub releases have repo defined."""
+        for name, tool in CLI_TOOLS.items():
+            if tool.get("latest_check") == "github_release":
+                assert "github_repo" in tool, f"{name} missing github_repo"
+
+
+class TestCategoryFunctionality:
+    """Tests for category-based functionality."""
+
+    @pytest.fixture
+    def checker(self):
+        """Create version checker instance."""
+        return VersionChecker(VersionCheckerConfig(
+            check_cli_tools=True,
+            check_python_deps=False,
+        ))
+
+    def test_get_tools_by_category(self, checker):
+        """Test getting tools grouped by category."""
+        categories = checker.get_tools_by_category()
+
+        assert "ai" in categories
+        assert "claude" in categories["ai"]
+        assert "cloud" in categories
+        assert "aws" in categories["cloud"]
+
+    @pytest.mark.asyncio
+    async def test_check_category(self, checker):
+        """Test checking tools by category."""
+        mock_info = VersionInfo(name="test", category="ai", installed="1.0.0")
+
+        with patch.object(checker, "check_cli_tool", return_value=mock_info):
+            results = await checker.check_category("ai")
+
+            # Should check all AI tools
+            assert len(results) > 0
+
+    def test_get_outdated_by_category(self, checker):
+        """Test getting outdated tools by category."""
+        checker._cache = {
+            "claude": VersionInfo(name="claude", category="ai", is_outdated=True),
+            "aws": VersionInfo(name="aws", category="cloud", is_outdated=True),
+            "git": VersionInfo(name="git", category="dev", is_outdated=False),
+        }
+
+        outdated = checker.get_outdated_by_category()
+
+        assert "ai" in outdated
+        assert "cloud" in outdated
+        assert "dev" not in outdated  # git is not outdated
+        assert len(outdated["ai"]) == 1
+        assert outdated["ai"][0].name == "claude"
+
+    def test_summary_includes_categories(self, checker):
+        """Test summary includes category information."""
+        checker._cache = {
+            "claude": VersionInfo(name="claude", category="ai", is_outdated=True),
+        }
+
+        summary = checker.get_summary()
+
+        assert "categories" in summary
+        assert "outdated_by_category" in summary
+
 
 class TestGlobalVersionChecker:
     """Tests for global version checker functions."""

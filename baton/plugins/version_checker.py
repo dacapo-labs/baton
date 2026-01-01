@@ -20,6 +20,7 @@ class VersionInfo:
     """Information about a tool's version."""
 
     name: str
+    category: str | None = None
     installed: str | None = None
     latest: str | None = None
     is_outdated: bool = False
@@ -30,6 +31,7 @@ class VersionInfo:
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
+            "category": self.category,
             "installed": self.installed,
             "latest": self.latest,
             "is_outdated": self.is_outdated,
@@ -51,8 +53,13 @@ class VersionCheckerConfig:
 
 
 # CLI tool definitions with version commands and update instructions
+# Organized by category for clarity
 CLI_TOOLS = {
+    # ==========================================================================
+    # AI/LLM CLI Tools (baton core)
+    # ==========================================================================
     "claude": {
+        "category": "ai",
         "version_cmd": ["claude", "--version"],
         "version_pattern": r"(\d+\.\d+\.\d+)",
         "latest_cmd": ["npm", "view", "@anthropic-ai/claude-code", "version"],
@@ -60,6 +67,7 @@ CLI_TOOLS = {
         "package_name": "@anthropic-ai/claude-code",
     },
     "codex": {
+        "category": "ai",
         "version_cmd": ["codex", "--version"],
         "version_pattern": r"(\d+\.\d+\.\d+)",
         "latest_cmd": ["npm", "view", "@openai/codex", "version"],
@@ -67,38 +75,182 @@ CLI_TOOLS = {
         "package_name": "@openai/codex",
     },
     "gemini": {
+        "category": "ai",
         "version_cmd": ["gemini", "--version"],
         "version_pattern": r"(\d+\.\d+\.\d+)",
         "latest_cmd": ["npm", "view", "@google/gemini-cli", "version"],
         "update_cmd": "npm update -g @google/gemini-cli",
         "package_name": "@google/gemini-cli",
     },
-    "gcloud": {
-        "version_cmd": ["gcloud", "version", "--format=json"],
-        "version_pattern": r'"Google Cloud SDK": "(\d+\.\d+\.\d+)"',
-        "latest_check": "gcloud_components",
-        "update_cmd": "gcloud components update",
-    },
-    "aws": {
-        "version_cmd": ["aws", "--version"],
-        "version_pattern": r"aws-cli/(\d+\.\d+\.\d+)",
-        "latest_cmd": ["pip", "index", "versions", "awscli"],
-        "update_cmd": "pip install --upgrade awscli",
-        "package_name": "awscli",
+    "fabric": {
+        "category": "ai",
+        "version_cmd": ["fabric", "--version"],
+        "version_pattern": r"(\d+\.\d+\.\d+)",
+        "update_cmd": "go install github.com/danielmiessler/fabric@latest",
+        "latest_check": "github_release",
+        "github_repo": "danielmiessler/fabric",
     },
     "litellm": {
+        "category": "ai",
         "version_cmd": ["litellm", "--version"],
         "version_pattern": r"(\d+\.\d+\.\d+)",
         "latest_cmd": ["pip", "index", "versions", "litellm"],
         "update_cmd": "pip install --upgrade litellm",
         "package_name": "litellm",
     },
+    # ==========================================================================
+    # Cloud CLI Tools
+    # ==========================================================================
+    "gcloud": {
+        "category": "cloud",
+        "version_cmd": ["gcloud", "version", "--format=json"],
+        "version_pattern": r'"Google Cloud SDK": "(\d+\.\d+\.\d+)"',
+        "latest_check": "gcloud_components",
+        "update_cmd": "gcloud components update",
+    },
+    "aws": {
+        "category": "cloud",
+        "version_cmd": ["aws", "--version"],
+        "version_pattern": r"aws-cli/(\d+\.\d+\.\d+)",
+        "latest_cmd": ["pip", "index", "versions", "awscli"],
+        "update_cmd": "pip install --upgrade awscli",
+        "package_name": "awscli",
+    },
+    "az": {
+        "category": "cloud",
+        "version_cmd": ["az", "version", "-o", "json"],
+        "version_pattern": r'"azure-cli": "(\d+\.\d+\.\d+)"',
+        "latest_cmd": ["pip", "index", "versions", "azure-cli"],
+        "update_cmd": "pip install --upgrade azure-cli",
+        "package_name": "azure-cli",
+    },
+    # ==========================================================================
+    # Developer Tools (from maestro)
+    # ==========================================================================
+    "gh": {
+        "category": "dev",
+        "version_cmd": ["gh", "--version"],
+        "version_pattern": r"gh version (\d+\.\d+\.\d+)",
+        "update_cmd": "brew upgrade gh || gh upgrade",
+        "latest_check": "github_release",
+        "github_repo": "cli/cli",
+    },
+    "git": {
+        "category": "dev",
+        "version_cmd": ["git", "--version"],
+        "version_pattern": r"git version (\d+\.\d+\.\d+)",
+        "update_cmd": "brew upgrade git || apt-get update && apt-get install git",
+    },
+    "delta": {
+        "category": "dev",
+        "version_cmd": ["delta", "--version"],
+        "version_pattern": r"delta (\d+\.\d+\.\d+)",
+        "update_cmd": "brew upgrade git-delta || cargo install git-delta",
+        "latest_check": "github_release",
+        "github_repo": "dandavison/delta",
+    },
+    "fzf": {
+        "category": "dev",
+        "version_cmd": ["fzf", "--version"],
+        "version_pattern": r"(\d+\.\d+\.\d+)",
+        "update_cmd": "brew upgrade fzf || go install github.com/junegunn/fzf@latest",
+        "latest_check": "github_release",
+        "github_repo": "junegunn/fzf",
+    },
+    # ==========================================================================
+    # Data/JSON Tools (from maestro)
+    # ==========================================================================
+    "jq": {
+        "category": "data",
+        "version_cmd": ["jq", "--version"],
+        "version_pattern": r"jq-(\d+\.\d+)",
+        "update_cmd": "brew upgrade jq || apt-get update && apt-get install jq",
+        "latest_check": "github_release",
+        "github_repo": "jqlang/jq",
+    },
+    "dasel": {
+        "category": "data",
+        "version_cmd": ["dasel", "version"],
+        "version_pattern": r"Version:\s*(\d+\.\d+\.\d+)",
+        "update_cmd": "brew upgrade dasel || go install github.com/tomwright/dasel/v2/cmd/dasel@latest",
+        "latest_check": "github_release",
+        "github_repo": "TomWright/dasel",
+    },
+    "yq": {
+        "category": "data",
+        "version_cmd": ["yq", "--version"],
+        "version_pattern": r"version v?(\d+\.\d+\.\d+)",
+        "update_cmd": "brew upgrade yq || go install github.com/mikefarah/yq/v4@latest",
+        "latest_check": "github_release",
+        "github_repo": "mikefarah/yq",
+    },
+    # ==========================================================================
+    # Security Tools (from maestro)
+    # ==========================================================================
+    "bw": {
+        "category": "security",
+        "version_cmd": ["bw", "--version"],
+        "version_pattern": r"(\d+\.\d+\.\d+)",
+        "latest_cmd": ["npm", "view", "@bitwarden/cli", "version"],
+        "update_cmd": "npm update -g @bitwarden/cli",
+        "package_name": "@bitwarden/cli",
+    },
+    # ==========================================================================
+    # Runtime/Package Managers
+    # ==========================================================================
+    "node": {
+        "category": "runtime",
+        "version_cmd": ["node", "--version"],
+        "version_pattern": r"v(\d+\.\d+\.\d+)",
+        "update_cmd": "nvm install node || brew upgrade node",
+    },
+    "npm": {
+        "category": "runtime",
+        "version_cmd": ["npm", "--version"],
+        "version_pattern": r"(\d+\.\d+\.\d+)",
+        "update_cmd": "npm install -g npm@latest",
+    },
+    "bun": {
+        "category": "runtime",
+        "version_cmd": ["bun", "--version"],
+        "version_pattern": r"(\d+\.\d+\.\d+)",
+        "update_cmd": "bun upgrade",
+        "latest_check": "github_release",
+        "github_repo": "oven-sh/bun",
+    },
+    "python": {
+        "category": "runtime",
+        "version_cmd": ["python3", "--version"],
+        "version_pattern": r"Python (\d+\.\d+\.\d+)",
+        "update_cmd": "brew upgrade python || apt-get update && apt-get install python3",
+    },
+    "go": {
+        "category": "runtime",
+        "version_cmd": ["go", "version"],
+        "version_pattern": r"go(\d+\.\d+\.\d+)",
+        "update_cmd": "brew upgrade go || apt-get update && apt-get install golang",
+    },
+    # ==========================================================================
+    # Testing/Automation Tools
+    # ==========================================================================
     "playwright": {
+        "category": "testing",
         "version_cmd": ["playwright", "--version"],
         "version_pattern": r"(\d+\.\d+\.\d+)",
         "latest_cmd": ["pip", "index", "versions", "playwright"],
         "update_cmd": "pip install --upgrade playwright && playwright install",
         "package_name": "playwright",
+    },
+    # ==========================================================================
+    # Communication Tools (from maestro)
+    # ==========================================================================
+    "himalaya": {
+        "category": "comm",
+        "version_cmd": ["himalaya", "--version"],
+        "version_pattern": r"himalaya (\d+\.\d+\.\d+)",
+        "update_cmd": "brew upgrade himalaya || cargo install himalaya",
+        "latest_check": "github_release",
+        "github_repo": "pimalaya/himalaya",
     },
 }
 
@@ -154,6 +306,31 @@ class VersionChecker:
         except (ValueError, AttributeError):
             return False
 
+    def _get_github_latest_version(self, repo: str) -> str | None:
+        """Get latest version from GitHub releases API."""
+        try:
+            import urllib.request
+            import urllib.error
+
+            url = f"https://api.github.com/repos/{repo}/releases/latest"
+            req = urllib.request.Request(url)
+            req.add_header("Accept", "application/vnd.github.v3+json")
+            req.add_header("User-Agent", "baton-version-checker")
+
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+                tag = data.get("tag_name", "")
+                # Strip leading 'v' if present
+                return tag.lstrip("v") if tag else None
+
+        except urllib.error.HTTPError as e:
+            if e.code == 403:
+                log.warning(f"GitHub rate limit hit for {repo}")
+            return None
+        except Exception as e:
+            log.debug(f"Failed to get GitHub release for {repo}: {e}")
+            return None
+
     async def check_cli_tool(self, name: str) -> VersionInfo:
         """Check version of a CLI tool."""
         if name not in CLI_TOOLS:
@@ -163,7 +340,11 @@ class VersionChecker:
             )
 
         tool = CLI_TOOLS[name]
-        info = VersionInfo(name=name, update_command=tool.get("update_cmd"))
+        info = VersionInfo(
+            name=name,
+            category=tool.get("category"),
+            update_command=tool.get("update_cmd"),
+        )
 
         # Get installed version
         success, output = self._run_command(tool["version_cmd"])
@@ -176,7 +357,7 @@ class VersionChecker:
             info.error = f"Could not parse version from: {output[:100]}"
             return info
 
-        # Get latest version
+        # Get latest version based on method
         if "latest_cmd" in tool:
             success, output = self._run_command(tool["latest_cmd"])
             if success:
@@ -209,6 +390,12 @@ class VersionChecker:
                             break
                 except json.JSONDecodeError:
                     pass
+
+        elif tool.get("latest_check") == "github_release":
+            # Get latest from GitHub releases
+            repo = tool.get("github_repo")
+            if repo:
+                info.latest = self._get_github_latest_version(repo)
 
         # Check if outdated
         if info.installed and info.latest:
@@ -341,18 +528,54 @@ class VersionChecker:
         self._last_check = now
         return results
 
+    async def check_category(self, category: str) -> dict[str, VersionInfo]:
+        """Check all tools in a specific category."""
+        results = {}
+        for name, tool in CLI_TOOLS.items():
+            if tool.get("category") == category:
+                results[name] = await self.check_cli_tool(name)
+                self._cache[name] = results[name]
+        return results
+
+    def get_tools_by_category(self) -> dict[str, list[str]]:
+        """Get tool names grouped by category."""
+        categories: dict[str, list[str]] = {}
+        for name, tool in CLI_TOOLS.items():
+            cat = tool.get("category", "other")
+            if cat not in categories:
+                categories[cat] = []
+            categories[cat].append(name)
+        return categories
+
     def get_outdated(self) -> list[VersionInfo]:
         """Get list of outdated tools."""
         return [v for v in self._cache.values() if v.is_outdated]
 
+    def get_outdated_by_category(self) -> dict[str, list[VersionInfo]]:
+        """Get outdated tools grouped by category."""
+        outdated: dict[str, list[VersionInfo]] = {}
+        for v in self._cache.values():
+            if v.is_outdated:
+                cat = v.category or "other"
+                if cat not in outdated:
+                    outdated[cat] = []
+                outdated[cat].append(v)
+        return outdated
+
     def get_summary(self) -> dict[str, Any]:
         """Get summary of version status."""
         outdated = self.get_outdated()
+        by_category = self.get_outdated_by_category()
         return {
             "total_checked": len(self._cache),
             "outdated_count": len(outdated),
             "outdated": [v.to_dict() for v in outdated],
+            "outdated_by_category": {
+                cat: [v.to_dict() for v in tools]
+                for cat, tools in by_category.items()
+            },
             "last_check": self._last_check,
+            "categories": self.get_tools_by_category(),
         }
 
     def start(self) -> None:

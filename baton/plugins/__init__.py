@@ -55,6 +55,15 @@ from .skills_cache import (
     start_skills_cache,
     stop_skills_cache,
 )
+from .skillsmp_cache import (
+    SkillsMPCache,
+    SkillsMPCacheConfig,
+    SkillsMPSkill,
+    get_skillsmp_cache,
+    init_skillsmp_cache,
+    start_skillsmp_cache,
+    stop_skillsmp_cache,
+)
 from .router import BatonRouter
 from .twilio import BatonTwilio
 from .zones import BatonZones
@@ -127,4 +136,12 @@ __all__ = [
     "init_skills_cache",
     "start_skills_cache",
     "stop_skills_cache",
+    # SkillsMP Cache
+    "SkillsMPCache",
+    "SkillsMPCacheConfig",
+    "SkillsMPSkill",
+    "get_skillsmp_cache",
+    "init_skillsmp_cache",
+    "start_skillsmp_cache",
+    "stop_skillsmp_cache",
 ]

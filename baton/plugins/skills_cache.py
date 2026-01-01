@@ -1,15 +1,14 @@
-"""Skills and MCP cache for baton.
+"""Skills cache for baton.
 
-Caches skill definitions and MCP tool schemas to reduce token usage
-and startup latency. Skills/MCP tools often load 5000+ tokens of
-definitions in every conversation - caching avoids this overhead.
+Caches skill definitions to reduce token usage and startup latency.
+Skills can load significant content in every conversation - caching
+avoids this overhead by indexing SKILL.md files.
 
 Features:
 - Discover and index skills from configured locations
 - Cache parsed SKILL.md content
-- Cache MCP server tool definitions
 - Track versions and detect updates
-- Provide unified API for skill/MCP management
+- Searchable skill index
 """
 
 from __future__ import annotations
@@ -17,8 +16,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
-import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,12 +26,6 @@ DEFAULT_SKILL_PATHS = [
     "~/.claude/skills",
     "~/maestro/.claude/skills",
     "~/libretto/.claude/skills",
-]
-
-# Default MCP config locations
-DEFAULT_MCP_CONFIGS = [
-    "~/.claude/mcp.json",
-    "~/maestro/.claude/mcp.json",
 ]
 
 
@@ -72,83 +63,10 @@ class SkillInfo:
 
 
 @dataclass
-class MCPToolInfo:
-    """Information about a cached MCP tool."""
-
-    server_name: str
-    tool_name: str
-    description: str
-    input_schema: dict[str, Any]
-    last_updated: float
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "server_name": self.server_name,
-            "tool_name": self.tool_name,
-            "description": self.description,
-            "input_schema": self.input_schema,
-            "last_updated": self.last_updated,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> MCPToolInfo:
-        return cls(
-            server_name=data["server_name"],
-            tool_name=data["tool_name"],
-            description=data["description"],
-            input_schema=data["input_schema"],
-            last_updated=data["last_updated"],
-        )
-
-
-@dataclass
-class MCPServerInfo:
-    """Information about an MCP server."""
-
-    name: str
-    server_type: str  # "stdio" or "http"
-    url: str | None = None
-    command: str | None = None
-    args: list[str] = field(default_factory=list)
-    env: dict[str, str] = field(default_factory=dict)
-    description: str = ""
-    tools: list[MCPToolInfo] = field(default_factory=list)
-    last_updated: float = 0
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "server_type": self.server_type,
-            "url": self.url,
-            "command": self.command,
-            "args": self.args,
-            "env": self.env,
-            "description": self.description,
-            "tools": [t.to_dict() for t in self.tools],
-            "last_updated": self.last_updated,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> MCPServerInfo:
-        return cls(
-            name=data["name"],
-            server_type=data["server_type"],
-            url=data.get("url"),
-            command=data.get("command"),
-            args=data.get("args", []),
-            env=data.get("env", {}),
-            description=data.get("description", ""),
-            tools=[MCPToolInfo.from_dict(t) for t in data.get("tools", [])],
-            last_updated=data.get("last_updated", 0),
-        )
-
-
-@dataclass
 class SkillsCacheConfig:
     """Configuration for skills cache."""
 
     skill_paths: list[str] = field(default_factory=lambda: DEFAULT_SKILL_PATHS.copy())
-    mcp_configs: list[str] = field(default_factory=lambda: DEFAULT_MCP_CONFIGS.copy())
     cache_file: str | None = None
     auto_refresh: bool = True
     refresh_interval: int = 3600  # 1 hour
@@ -156,12 +74,11 @@ class SkillsCacheConfig:
 
 
 class SkillsCache:
-    """Cache for skills and MCP tool definitions."""
+    """Cache for skill definitions."""
 
     def __init__(self, config: SkillsCacheConfig | None = None):
         self.config = config or SkillsCacheConfig()
         self._skills: dict[str, SkillInfo] = {}
-        self._mcp_servers: dict[str, MCPServerInfo] = {}
         self._running = False
         self._task: asyncio.Task | None = None
 
@@ -186,10 +103,6 @@ class SkillsCache:
                 skill = SkillInfo.from_dict(skill_data)
                 self._skills[skill.name] = skill
 
-            for server_data in data.get("mcp_servers", []):
-                server = MCPServerInfo.from_dict(server_data)
-                self._mcp_servers[server.name] = server
-
         except (json.JSONDecodeError, KeyError, OSError):
             pass  # Start fresh if cache is corrupted
 
@@ -203,7 +116,6 @@ class SkillsCache:
 
         data = {
             "skills": [s.to_dict() for s in self._skills.values()],
-            "mcp_servers": [s.to_dict() for s in self._mcp_servers.values()],
             "updated": time.time(),
         }
 
@@ -322,120 +234,6 @@ class SkillsCache:
 
         return results
 
-    def load_mcp_configs(self) -> dict[str, MCPServerInfo]:
-        """Load MCP server configurations."""
-        servers = {}
-
-        for config_path in self.config.mcp_configs:
-            path = Path(config_path).expanduser()
-            if not path.exists():
-                continue
-
-            try:
-                with open(path) as f:
-                    data = json.load(f)
-
-                for name, config in data.get("mcpServers", {}).items():
-                    # Skip example configs
-                    if name.startswith("_"):
-                        continue
-
-                    server = MCPServerInfo(
-                        name=name,
-                        server_type=config.get("type", "stdio"),
-                        url=config.get("url"),
-                        command=config.get("command"),
-                        args=config.get("args", []),
-                        env=config.get("env", {}),
-                        description=config.get("description", ""),
-                        last_updated=time.time(),
-                    )
-                    servers[name] = server
-
-            except (json.JSONDecodeError, OSError):
-                continue
-
-        return servers
-
-    def refresh_mcp_servers(self) -> dict[str, str]:
-        """Refresh MCP server cache, returns changes."""
-        changes = {}
-        discovered = self.load_mcp_configs()
-
-        for name, server in discovered.items():
-            existing = self._mcp_servers.get(name)
-            if existing is None:
-                changes[name] = "added"
-                self._mcp_servers[name] = server
-            # Note: We don't compare tools here, just server config
-
-        # Check for removed servers
-        for name in list(self._mcp_servers.keys()):
-            if name not in discovered:
-                changes[name] = "removed"
-                del self._mcp_servers[name]
-
-        if changes:
-            self._save_cache()
-            if self.config.notify_callback:
-                self.config.notify_callback("mcp_changed", changes)
-
-        return changes
-
-    async def fetch_mcp_tools(self, server_name: str) -> list[MCPToolInfo]:
-        """Fetch tool definitions from an MCP server."""
-        server = self._mcp_servers.get(server_name)
-        if not server:
-            return []
-
-        tools = []
-
-        if server.server_type == "http" and server.url:
-            # HTTP MCP server - fetch via API
-            tools = await self._fetch_http_mcp_tools(server)
-        elif server.server_type == "stdio" and server.command:
-            # Stdio MCP server - spawn and query
-            tools = await self._fetch_stdio_mcp_tools(server)
-
-        server.tools = tools
-        server.last_updated = time.time()
-        self._save_cache()
-
-        return tools
-
-    async def _fetch_http_mcp_tools(self, server: MCPServerInfo) -> list[MCPToolInfo]:
-        """Fetch tools from HTTP MCP server."""
-        # HTTP MCP servers typically expose /tools endpoint
-        # This is a placeholder - actual implementation depends on MCP spec
-        return []
-
-    async def _fetch_stdio_mcp_tools(self, server: MCPServerInfo) -> list[MCPToolInfo]:
-        """Fetch tools from stdio MCP server."""
-        # Stdio servers need to be spawned and queried via JSON-RPC
-        # This is a placeholder - actual implementation depends on MCP spec
-        return []
-
-    def get_mcp_server(self, name: str) -> MCPServerInfo | None:
-        """Get an MCP server by name."""
-        return self._mcp_servers.get(name)
-
-    def get_all_mcp_servers(self) -> list[MCPServerInfo]:
-        """Get all configured MCP servers."""
-        return list(self._mcp_servers.values())
-
-    def get_mcp_tools_summary(self) -> str:
-        """Get a summary of all cached MCP tools (for token estimation)."""
-        lines = []
-        total_tools = 0
-
-        for server in self._mcp_servers.values():
-            tool_count = len(server.tools)
-            total_tools += tool_count
-            lines.append(f"{server.name}: {tool_count} tools")
-
-        lines.append(f"Total: {total_tools} tools")
-        return "\n".join(lines)
-
     def get_skills_summary(self) -> dict[str, Any]:
         """Get summary of cached skills."""
         by_prefix = {}
@@ -449,15 +247,9 @@ class SkillsCache:
             "skills": [s.name for s in self._skills.values()],
         }
 
-    async def refresh_all(self) -> dict[str, Any]:
-        """Refresh both skills and MCP server caches."""
-        skill_changes = self.refresh_skills()
-        mcp_changes = self.refresh_mcp_servers()
-
-        return {
-            "skills": skill_changes,
-            "mcp_servers": mcp_changes,
-        }
+    async def refresh(self) -> dict[str, str]:
+        """Refresh skill cache."""
+        return self.refresh_skills()
 
     async def start(self) -> None:
         """Start background refresh task."""
@@ -468,7 +260,7 @@ class SkillsCache:
 
         async def refresh_loop():
             while self._running:
-                await self.refresh_all()
+                await self.refresh()
                 await asyncio.sleep(self.config.refresh_interval)
 
         self._task = asyncio.create_task(refresh_loop())

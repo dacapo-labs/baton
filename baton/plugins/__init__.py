@@ -26,6 +26,15 @@ from .model_monitor import (
     start_model_monitor,
     stop_model_monitor,
 )
+from .version_checker import (
+    VersionChecker,
+    VersionCheckerConfig,
+    VersionInfo,
+    get_version_checker,
+    init_version_checker,
+    start_version_checker,
+    stop_version_checker,
+)
 from .router import BatonRouter
 from .twilio import BatonTwilio
 from .zones import BatonZones
@@ -72,4 +81,12 @@ __all__ = [
     "init_model_monitor",
     "start_model_monitor",
     "stop_model_monitor",
+    # Version Checker
+    "VersionChecker",
+    "VersionCheckerConfig",
+    "VersionInfo",
+    "get_version_checker",
+    "init_version_checker",
+    "start_version_checker",
+    "stop_version_checker",
 ]

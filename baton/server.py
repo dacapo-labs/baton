@@ -9,8 +9,8 @@ from typing import Any
 from uuid import uuid4
 
 import litellm
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from .config import load_config
@@ -21,6 +21,21 @@ from .plugins.guardrails import BatonGuardrails
 from .plugins.rate_limits import get_rate_limiter, init_rate_limiter, RateLimitTracker
 from .plugins.model_checker import get_model_checker, init_model_checker, ModelAvailabilityChecker
 from .plugins.model_monitor import get_model_monitor, init_model_monitor, ModelMonitor, MonitorConfig
+from .plugins.version_checker import (
+    VersionChecker,
+    VersionCheckerConfig,
+    init_version_checker,
+    get_version_checker,
+)
+from .plugins.repo_updater import (
+    RepoUpdater,
+    RepoUpdaterConfig,
+    init_repo_updater,
+    get_repo_updater,
+    clone_repo,
+    KNOWN_REPOS,
+)
+from .plugins.twilio import BatonTwilio
 from .plugins.skills_cache import (
     SkillsCache,
     SkillsCacheConfig,
@@ -68,6 +83,9 @@ guardrails: BatonGuardrails | None = None
 rate_limiter: RateLimitTracker | None = None
 model_checker: ModelAvailabilityChecker | None = None
 model_monitor: ModelMonitor | None = None
+version_checker: VersionChecker | None = None
+repo_updater: RepoUpdater | None = None
+twilio: BatonTwilio | None = None
 skills_cache: SkillsCache | None = None
 skillsmp_cache: SkillsMPCache | None = None
 keepalive: KeepaliveDaemon | None = None
@@ -78,7 +96,8 @@ cli_auth: CLIAuthManager | None = None
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     global config, auth, logger, judge, fanout, zones, router, guardrails, rate_limiter
-    global model_checker, model_monitor, skills_cache, skillsmp_cache, keepalive, cli_auth
+    global model_checker, model_monitor, version_checker, repo_updater, twilio
+    global skills_cache, skillsmp_cache, keepalive, cli_auth
 
     config = load_config()
 
@@ -102,6 +121,29 @@ async def lifespan(app: FastAPI):
             check_vertex=monitor_config.get("check_vertex", True),
         ))
         model_monitor.start()
+
+    # Initialize version checker
+    version_config = config.get("version_checker", {})
+    if version_config.get("enabled", False):
+        version_checker = init_version_checker(VersionCheckerConfig(
+            check_interval=version_config.get("check_interval", 86400),
+            check_cli_tools=version_config.get("check_cli_tools", True),
+            check_python_deps=version_config.get("check_python_deps", True),
+        ))
+        version_checker.start()
+
+    # Initialize repo updater
+    repo_config = config.get("repo_updater", {})
+    if repo_config.get("enabled", False):
+        repo_updater = init_repo_updater(RepoUpdaterConfig(
+            check_interval=repo_config.get("check_interval", 3600),
+            auto_update=repo_config.get("auto_update", False),
+            repos_file=repo_config.get("repos_file"),
+        ))
+        repo_updater.start()
+
+    # Initialize Twilio for SMS notifications
+    twilio = BatonTwilio(config)
 
     env_vars = auth.export_env_vars()
     for key, value in env_vars.items():
@@ -154,6 +196,10 @@ async def lifespan(app: FastAPI):
         keepalive.stop()
     if model_monitor:
         model_monitor.stop()
+    if version_checker:
+        version_checker.stop()
+    if repo_updater:
+        repo_updater.stop()
     await stop_skills_cache()
     await stop_skillsmp_cache()
 
@@ -1455,6 +1501,359 @@ async def models_monitor_check_now():
         "checked": True,
         "changes": [c.to_dict() for c in changes],
     }
+
+
+# =========================================================================
+# Version Checker Endpoints
+# =========================================================================
+
+
+@app.get("/updates")
+async def updates_summary():
+    """Get summary of version status for all tools."""
+    if not version_checker:
+        return {"enabled": False, "message": "Version checker not enabled"}
+
+    return {
+        "enabled": True,
+        "summary": version_checker.get_summary(),
+    }
+
+
+@app.get("/updates/tools")
+async def updates_list_tools():
+    """List all tools by category."""
+    if not version_checker:
+        return {"enabled": False, "categories": {}}
+
+    return {
+        "enabled": True,
+        "categories": version_checker.get_tools_by_category(),
+    }
+
+
+@app.get("/updates/check")
+async def updates_check_all(use_cache: bool = True):
+    """Check all tools for updates."""
+    if not version_checker:
+        raise HTTPException(status_code=503, detail="Version checker not enabled")
+
+    results = await version_checker.check_all(use_cache=use_cache)
+    return {
+        "cli_tools": {k: v.to_dict() for k, v in results.get("cli_tools", {}).items()},
+        "python_deps": {k: v.to_dict() for k, v in results.get("python_deps", {}).items()},
+    }
+
+
+@app.get("/updates/check/{tool_name}")
+async def updates_check_tool(tool_name: str):
+    """Check a specific tool for updates."""
+    if not version_checker:
+        raise HTTPException(status_code=503, detail="Version checker not enabled")
+
+    result = await version_checker.check_cli_tool(tool_name)
+    return result.to_dict()
+
+
+@app.get("/updates/category/{category}")
+async def updates_check_category(category: str):
+    """Check all tools in a category for updates."""
+    if not version_checker:
+        raise HTTPException(status_code=503, detail="Version checker not enabled")
+
+    results = await version_checker.check_category(category)
+    return {
+        "category": category,
+        "tools": {k: v.to_dict() for k, v in results.items()},
+    }
+
+
+@app.get("/updates/outdated")
+async def updates_outdated():
+    """Get list of outdated tools."""
+    if not version_checker:
+        return {"enabled": False, "outdated": []}
+
+    outdated = version_checker.get_outdated()
+    by_category = version_checker.get_outdated_by_category()
+
+    return {
+        "enabled": True,
+        "outdated": [v.to_dict() for v in outdated],
+        "by_category": {
+            cat: [v.to_dict() for v in tools]
+            for cat, tools in by_category.items()
+        },
+    }
+
+
+@app.post("/updates/refresh")
+async def updates_refresh():
+    """Force refresh version checks."""
+    if not version_checker:
+        raise HTTPException(status_code=503, detail="Version checker not enabled")
+
+    results = await version_checker.check_all(use_cache=False)
+    return {
+        "refreshed": True,
+        "cli_tools": {k: v.to_dict() for k, v in results.get("cli_tools", {}).items()},
+        "python_deps": {k: v.to_dict() for k, v in results.get("python_deps", {}).items()},
+    }
+
+
+# =========================================================================
+# Repo Updater Endpoints
+# =========================================================================
+
+
+@app.get("/repos")
+async def repos_summary():
+    """Get summary of tracked repositories."""
+    if not repo_updater:
+        return {"enabled": False, "message": "Repo updater not enabled"}
+
+    return {
+        "enabled": True,
+        "summary": repo_updater.get_summary(),
+    }
+
+
+@app.get("/repos/list")
+async def repos_list():
+    """List all tracked repositories."""
+    if not repo_updater:
+        return {"enabled": False, "repos": []}
+
+    repos = repo_updater.get_all_repos()
+    return {
+        "enabled": True,
+        "repos": {name: info.to_dict() for name, info in repos.items()},
+    }
+
+
+@app.get("/repos/known")
+async def repos_known():
+    """List known repositories that can be cloned."""
+    return {"known_repos": KNOWN_REPOS}
+
+
+class RepoAddRequest(BaseModel):
+    """Request to add a repository."""
+
+    name: str
+    path: str
+    branch: str = "main"
+
+
+@app.post("/repos/add")
+async def repos_add(request: RepoAddRequest):
+    """Add a repository to track."""
+    if not repo_updater:
+        raise HTTPException(status_code=503, detail="Repo updater not enabled")
+
+    info = repo_updater.add_repo(request.name, request.path, request.branch)
+    return info.to_dict()
+
+
+@app.delete("/repos/{name}")
+async def repos_remove(name: str):
+    """Remove a repository from tracking."""
+    if not repo_updater:
+        raise HTTPException(status_code=503, detail="Repo updater not enabled")
+
+    removed = repo_updater.remove_repo(name)
+    return {"removed": removed, "name": name}
+
+
+class RepoDiscoverRequest(BaseModel):
+    """Request to discover repositories."""
+
+    search_paths: list[str] | None = None
+
+
+@app.post("/repos/discover")
+async def repos_discover(request: RepoDiscoverRequest | None = None):
+    """Discover git repositories in common locations."""
+    if not repo_updater:
+        raise HTTPException(status_code=503, detail="Repo updater not enabled")
+
+    search_paths = request.search_paths if request else None
+    discovered = repo_updater.discover_repos(search_paths)
+    return {
+        "discovered": [info.to_dict() for info in discovered],
+        "count": len(discovered),
+    }
+
+
+@app.get("/repos/check")
+async def repos_check_all():
+    """Check all tracked repositories for updates."""
+    if not repo_updater:
+        raise HTTPException(status_code=503, detail="Repo updater not enabled")
+
+    results = await repo_updater.check_all()
+    return {
+        "repos": {name: info.to_dict() for name, info in results.items()},
+        "with_updates": [
+            info.to_dict() for info in results.values() if info.has_updates
+        ],
+    }
+
+
+@app.get("/repos/check/{name}")
+async def repos_check_one(name: str):
+    """Check a specific repository for updates."""
+    if not repo_updater:
+        raise HTTPException(status_code=503, detail="Repo updater not enabled")
+
+    info = await repo_updater.check_repo(name)
+    return info.to_dict()
+
+
+@app.post("/repos/update/{name}")
+async def repos_update_one(name: str, force: bool = False):
+    """Update a specific repository."""
+    if not repo_updater:
+        raise HTTPException(status_code=503, detail="Repo updater not enabled")
+
+    info = await repo_updater.update_repo(name, force=force)
+    return info.to_dict()
+
+
+@app.post("/repos/update-all")
+async def repos_update_all(force: bool = False):
+    """Update all tracked repositories."""
+    if not repo_updater:
+        raise HTTPException(status_code=503, detail="Repo updater not enabled")
+
+    results = await repo_updater.update_all(force=force)
+    return {
+        "repos": {name: info.to_dict() for name, info in results.items()},
+        "updated": [
+            name for name, info in results.items()
+            if info.last_updated and not info.error
+        ],
+    }
+
+
+class RepoCloneRequest(BaseModel):
+    """Request to clone a known repository."""
+
+    name: str
+    target_path: str | None = None
+    branch: str = "main"
+
+
+@app.post("/repos/clone")
+async def repos_clone(request: RepoCloneRequest):
+    """Clone a known repository."""
+    info = await clone_repo(request.name, request.target_path, request.branch)
+
+    # Add to tracking if successful
+    if not info.error and repo_updater:
+        repo_updater.add_repo(info.name, info.path, info.branch)
+
+    return info.to_dict()
+
+
+# =========================================================================
+# Notification (Twilio) Endpoints
+# =========================================================================
+
+
+@app.get("/notify/status")
+async def notify_status():
+    """Get notification configuration status."""
+    if not twilio:
+        return {"enabled": False, "message": "Twilio not initialized"}
+
+    return {
+        "enabled": twilio.enabled,
+        "configured": twilio.is_configured(),
+        "from_number": twilio.from_number[:6] + "****" if twilio.from_number else None,
+        "to_number": twilio.to_number[:6] + "****" if twilio.to_number else None,
+    }
+
+
+class SMSRequest(BaseModel):
+    """Request to send an SMS."""
+
+    message: str
+    to: str | None = None
+
+
+@app.post("/notify/sms")
+async def notify_send_sms(request: SMSRequest):
+    """Send an SMS message."""
+    if not twilio or not twilio.enabled:
+        raise HTTPException(status_code=503, detail="Twilio not configured")
+
+    result = await twilio.send_sms(request.message, request.to)
+    return result
+
+
+class MFARequest(BaseModel):
+    """Request to send an MFA code."""
+
+    code: str
+    service: str
+    to: str | None = None
+
+
+@app.post("/notify/mfa")
+async def notify_send_mfa(request: MFARequest):
+    """Send an MFA code via SMS."""
+    if not twilio or not twilio.enabled:
+        raise HTTPException(status_code=503, detail="Twilio not configured")
+
+    result = await twilio.send_mfa_code(request.code, request.service, request.to)
+    return result
+
+
+class ApprovalRequest(BaseModel):
+    """Request for approval via SMS."""
+
+    request_id: str
+    action: str
+    details: str
+    to: str | None = None
+
+
+@app.post("/notify/approval")
+async def notify_request_approval(request: ApprovalRequest):
+    """Send an approval request and wait for response."""
+    if not twilio or not twilio.enabled:
+        raise HTTPException(status_code=503, detail="Twilio not configured")
+
+    result = await twilio.send_approval_request(
+        request.request_id,
+        request.action,
+        request.details,
+        request.to,
+    )
+
+    return {
+        "request_id": request.request_id,
+        "result": result,
+        "approved": result == "approved",
+        "denied": result == "denied",
+        "timed_out": result is None,
+    }
+
+
+# Twilio webhook for incoming SMS
+@app.post("/notify/webhook")
+async def notify_webhook(From: str = Form(...), Body: str = Form(...)):
+    """Handle incoming Twilio SMS webhook."""
+    if not twilio:
+        raise HTTPException(status_code=503, detail="Twilio not configured")
+
+    twilio.handle_incoming_sms(From, Body)
+
+    return Response(
+        content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+        media_type="application/xml",
+    )
 
 
 def run():

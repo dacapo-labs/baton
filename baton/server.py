@@ -65,6 +65,12 @@ from .plugins.standards_monitor import (
     get_standards_monitor,
     MONITORED_REPOS,
 )
+from .plugins.ssm import (
+    SSMManager,
+    SSMManagerConfig,
+    init_ssm_manager,
+    get_ssm_manager,
+)
 
 
 class ChatRequest(BaseModel):
@@ -98,6 +104,7 @@ skillsmp_cache: SkillsMPCache | None = None
 keepalive: KeepaliveDaemon | None = None
 cli_auth: CLIAuthManager | None = None
 standards_monitor: StandardsMonitor | None = None
+ssm_manager: SSMManager | None = None
 
 
 @asynccontextmanager
@@ -105,7 +112,7 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     global config, auth, logger, judge, fanout, zones, router, guardrails, rate_limiter
     global model_checker, model_monitor, version_checker, repo_updater, twilio
-    global skills_cache, skillsmp_cache, keepalive, cli_auth, standards_monitor
+    global skills_cache, skillsmp_cache, keepalive, cli_auth, standards_monitor, ssm_manager
 
     config = load_config()
 
@@ -210,6 +217,15 @@ async def lifespan(app: FastAPI):
             monitor_api_changes=standards_config.get("monitor_api_changes", True),
         ))
         standards_monitor.start()
+
+    # Initialize SSM manager for AWS VPC resource access
+    ssm_config = config.get("ssm", {})
+    if ssm_config.get("enabled", True):
+        ssm_manager = init_ssm_manager(SSMManagerConfig(
+            default_region=ssm_config.get("default_region", "us-east-1"),
+            cache_ttl=ssm_config.get("cache_ttl", 300),
+            auto_discover_resources=ssm_config.get("auto_discover_resources", True),
+        ))
 
     yield
 
@@ -2258,6 +2274,252 @@ async def standards_compatibility():
         raise HTTPException(status_code=503, detail="Standards monitor not enabled")
 
     return standards_monitor.get_compatibility_matrix()
+
+
+# =========================================================================
+# SSM (AWS Systems Manager) Endpoints
+# =========================================================================
+
+
+@app.get("/ssm/status")
+async def ssm_status():
+    """Get SSM status and prerequisites check."""
+    if not ssm_manager:
+        return {"enabled": False, "message": "SSM manager not enabled"}
+
+    # Get current zone's AWS profile
+    profile = None
+    region = None
+    if zones:
+        zone_name = zones.get_current_zone()
+        if zone_name:
+            zone_config = zones.get_zone_config(zone_name)
+            profile = zone_config.get("aws", {}).get("profile")
+            region = zone_config.get("aws", {}).get("region")
+
+    prereqs = await ssm_manager.check_ssm_prerequisites(region, profile)
+
+    return {
+        "enabled": True,
+        "zone": zones.get_current_zone() if zones else None,
+        "aws_profile": profile,
+        "aws_region": region or ssm_manager.config.default_region,
+        "prerequisites": prereqs,
+        "summary": ssm_manager.get_summary(),
+    }
+
+
+@app.get("/ssm/instances")
+async def ssm_instances(
+    region: str | None = None,
+    profile: str | None = None,
+    refresh: bool = False,
+):
+    """List all SSM-managed EC2 instances.
+
+    These instances can be used as jump hosts for port forwarding.
+    """
+    if not ssm_manager:
+        raise HTTPException(status_code=503, detail="SSM manager not enabled")
+
+    # Use zone defaults if not specified
+    if not profile and zones:
+        zone_name = zones.get_current_zone()
+        if zone_name:
+            zone_config = zones.get_zone_config(zone_name)
+            profile = profile or zone_config.get("aws", {}).get("profile")
+            region = region or zone_config.get("aws", {}).get("region")
+
+    instances = await ssm_manager.get_ssm_instances(region, profile, refresh)
+
+    return {
+        "instances": [i.to_dict() for i in instances],
+        "count": len(instances),
+        "online": sum(1 for i in instances if i.ping_status == "Online"),
+        "region": region or ssm_manager.config.default_region,
+        "profile": profile,
+    }
+
+
+@app.get("/ssm/resources")
+async def ssm_resources(
+    vpc_id: str | None = None,
+    region: str | None = None,
+    profile: str | None = None,
+    types: str | None = None,
+):
+    """Discover VPC resources reachable via SSM port forwarding.
+
+    Discovers: RDS, ElastiCache, OpenSearch, internal ELBs, EC2 without SSM.
+
+    Args:
+        vpc_id: Filter to specific VPC
+        region: AWS region
+        profile: AWS profile
+        types: Comma-separated resource types (rds,elasticache,elb,opensearch,ec2)
+    """
+    if not ssm_manager:
+        raise HTTPException(status_code=503, detail="SSM manager not enabled")
+
+    # Use zone defaults if not specified
+    if not profile and zones:
+        zone_name = zones.get_current_zone()
+        if zone_name:
+            zone_config = zones.get_zone_config(zone_name)
+            profile = profile or zone_config.get("aws", {}).get("profile")
+            region = region or zone_config.get("aws", {}).get("region")
+
+    resource_types = types.split(",") if types else None
+    resources = await ssm_manager.get_vpc_resources(vpc_id, region, profile, resource_types)
+
+    # Group by type
+    by_type: dict[str, list] = {}
+    for r in resources:
+        by_type.setdefault(r.resource_type, []).append(r.to_dict())
+
+    return {
+        "resources": [r.to_dict() for r in resources],
+        "by_type": by_type,
+        "count": len(resources),
+        "vpc_id": vpc_id,
+        "region": region or ssm_manager.config.default_region,
+        "profile": profile,
+    }
+
+
+@app.get("/ssm/audit")
+async def ssm_audit(
+    region: str | None = None,
+    profile: str | None = None,
+):
+    """Full audit: SSM instances + all reachable VPC resources.
+
+    Shows what you can access via SSM in the current AWS context.
+    """
+    if not ssm_manager:
+        raise HTTPException(status_code=503, detail="SSM manager not enabled")
+
+    # Use zone defaults
+    if not profile and zones:
+        zone_name = zones.get_current_zone()
+        if zone_name:
+            zone_config = zones.get_zone_config(zone_name)
+            profile = profile or zone_config.get("aws", {}).get("profile")
+            region = region or zone_config.get("aws", {}).get("region")
+
+    # Get SSM instances
+    instances = await ssm_manager.get_ssm_instances(region, profile)
+    online_instances = [i for i in instances if i.ping_status == "Online"]
+
+    # Get VPCs from instances
+    vpc_ids = list(set(i.vpc_id for i in instances if i.vpc_id))
+
+    # Discover resources in each VPC
+    all_resources = []
+    for vpc_id in vpc_ids:
+        resources = await ssm_manager.get_vpc_resources(vpc_id, region, profile)
+        all_resources.extend(resources)
+
+    # Group resources by type
+    by_type: dict[str, list] = {}
+    for r in all_resources:
+        by_type.setdefault(r.resource_type, []).append(r.to_dict())
+
+    return {
+        "zone": zones.get_current_zone() if zones else None,
+        "aws_profile": profile,
+        "aws_region": region or ssm_manager.config.default_region,
+        "ssm_instances": {
+            "total": len(instances),
+            "online": len(online_instances),
+            "instances": [i.to_dict() for i in online_instances],
+        },
+        "vpc_resources": {
+            "vpcs": vpc_ids,
+            "total": len(all_resources),
+            "by_type": by_type,
+        },
+        "access_summary": {
+            "can_shell": len(online_instances),
+            "can_reach_rds": len(by_type.get("rds", [])) + len(by_type.get("rds-cluster", [])),
+            "can_reach_cache": len(by_type.get("elasticache", [])),
+            "can_reach_search": len(by_type.get("opensearch", [])),
+            "can_reach_ec2": len(by_type.get("ec2", [])),
+            "can_reach_elb": len(by_type.get("elb", [])),
+        },
+    }
+
+
+class PortForwardRequest(BaseModel):
+    """Request for port forward command generation."""
+
+    instance_id: str
+    remote_host: str
+    remote_port: int
+    local_port: int | None = None
+
+
+@app.post("/ssm/port-forward")
+async def ssm_port_forward(
+    request: PortForwardRequest,
+    region: str | None = None,
+    profile: str | None = None,
+):
+    """Generate port forwarding command for SSM.
+
+    Returns the AWS CLI command to run locally.
+    """
+    if not ssm_manager:
+        raise HTTPException(status_code=503, detail="SSM manager not enabled")
+
+    # Use zone defaults
+    if not profile and zones:
+        zone_name = zones.get_current_zone()
+        if zone_name:
+            zone_config = zones.get_zone_config(zone_name)
+            profile = profile or zone_config.get("aws", {}).get("profile")
+            region = region or zone_config.get("aws", {}).get("region")
+
+    cmd = ssm_manager.generate_port_forward_command(
+        instance_id=request.instance_id,
+        remote_host=request.remote_host,
+        remote_port=request.remote_port,
+        local_port=request.local_port,
+        region=region,
+        profile=profile,
+    )
+
+    return cmd
+
+
+@app.post("/ssm/session")
+async def ssm_session(
+    instance_id: str,
+    region: str | None = None,
+    profile: str | None = None,
+):
+    """Generate interactive session command for SSM.
+
+    Returns the AWS CLI command to run locally.
+    """
+    if not ssm_manager:
+        raise HTTPException(status_code=503, detail="SSM manager not enabled")
+
+    # Use zone defaults
+    if not profile and zones:
+        zone_name = zones.get_current_zone()
+        if zone_name:
+            zone_config = zones.get_zone_config(zone_name)
+            profile = profile or zone_config.get("aws", {}).get("profile")
+            region = region or zone_config.get("aws", {}).get("region")
+
+    cmd = ssm_manager.generate_session_command(
+        instance_id=instance_id,
+        region=region,
+        profile=profile,
+    )
+
+    return cmd
 
 
 # =========================================================================
